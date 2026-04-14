@@ -1,0 +1,25 @@
+{
+  "name": "hotel-mail-server",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "firebase-admin": "^13.6.1",
+    "googleapis": "^171.3.0",
+    "imap-simple": "^5.1.0",
+    "mailparser": "^3.9.6",
+    "nodemailer": "^7.0.13",
+    "pdf-parse": "^1.1.1"
+  }
+}
