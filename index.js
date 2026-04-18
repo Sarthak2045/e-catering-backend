@@ -30,7 +30,7 @@ const MODEL_NAME = "gemma-3-4b-it";
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: MODEL_NAME });
 
-// 🟢 MEMORY CACHE (Prevents Loops)
+// 🟢 MEMORY CACHE (Prevents Loops & Duplicates)
 const processedCache = new Set();
 
 // Smart Pathing: Uses Render's secure vault in the cloud, or local file on your PC
@@ -56,7 +56,7 @@ if (typeof pdfParse !== 'function') {
 const IMAP_CONFIG = {
     imap: {
         user: HOTEL_EMAIL,
-        password: APP_PASSWORD ? APP_PASSWORD.replace(/\s/g, '') : '', // Automatically removes spaces just in case
+        password: APP_PASSWORD ? APP_PASSWORD.replace(/\s/g, '') : '', 
         host: 'imap.gmail.com',
         port: 993,
         tls: true,
@@ -75,19 +75,28 @@ async function startImapPolling() {
         // Check for new emails every 20 seconds
         setInterval(async () => {
             try {
-                // Fetch UNREAD emails
-                const searchCriteria = ['UNSEEN'];
+                // 1. Generate today's date in IMAP format (e.g., "Apr 18, 2026")
+                const today = new Date();
+                const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+                const imapDate = `${months[today.getMonth()]} ${today.getDate()}, ${today.getFullYear()}`;
+
+                // 2. Fetch ALL emails (Read OR Unread) that arrived today
+                const searchCriteria = ['ALL', ['SINCE', imapDate]];
                 const fetchOptions = { bodies: [''], markSeen: false }; 
                 const messages = await connection.search(searchCriteria, fetchOptions);
 
                 if (messages.length === 0) return;
-                console.log(`📩 Processing ${messages.length} new emails...`);
+                
+                // Only log if we find emails we haven't processed yet
+                const newMessages = messages.filter(m => !processedCache.has(m.attributes.uid));
+                if (newMessages.length > 0) {
+                    console.log(`📩 Found ${messages.length} total emails today. Processing ${newMessages.length} new ones...`);
+                }
 
                 for (let item of messages) {
                     const uid = item.attributes.uid;
                     if (processedCache.has(uid)) {
-                        console.log(`   ⏭️ Skipping duplicate UID: ${uid}`);
-                        continue; 
+                        continue; // Skip silently to keep logs clean
                     }
 
                     // Parse the email body
@@ -99,7 +108,7 @@ async function startImapPolling() {
 
                     // Ignore non-order emails
                     if (!subject.match(/Order|Booking|PNR|Reservation|Invoice|Bill|Catering/i)) {
-                        await connection.addFlags(uid, ['\\Seen']); // Mark as Read
+                        processedCache.add(uid); // Add to cache so we don't scan it again
                         continue;
                     }
 
@@ -142,12 +151,10 @@ async function startImapPolling() {
                         });
 
                         console.log(`✅ SAVED: #${finalOrderNo} | Total: ₹${orderData.totalAmount}`);
-                        await connection.addFlags(uid, ['\\Seen']); // Mark as Read
                         processedCache.add(uid);
 
                     } else {
-                        console.log("   ❌ AI Failed to extract data. Marking read.");
-                        await connection.addFlags(uid, ['\\Seen']);
+                        console.log("   ❌ AI Failed to extract data. Skipping.");
                         processedCache.add(uid);
                     }
                 }
