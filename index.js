@@ -70,52 +70,59 @@ async function startImapPolling() {
     try {
         const connection = await imaps.connect(IMAP_CONFIG);
         await connection.openBox('INBOX');
-        console.log("✅ Connected! Watching for new orders...");
+        console.log("✅ Connected! Watching for new orders strictly from TODAY onwards...");
 
-        // Check for new emails every 20 seconds
         setInterval(async () => {
             try {
-                // 1. Generate today's date in IMAP format (e.g., "Apr 18, 2026")
-                const today = new Date();
+                // 1. Give IMAP a 1-day buffer because Render runs on US Time (UTC)
+                const bufferDate = new Date(Date.now() - 24 * 60 * 60 * 1000);
                 const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-                const imapDate = `${months[today.getMonth()]} ${today.getDate()}, ${today.getFullYear()}`;
+                const imapDate = `${months[bufferDate.getMonth()]} ${bufferDate.getDate()}, ${bufferDate.getFullYear()}`;
 
-                // 2. Fetch ALL emails (Read OR Unread) that arrived today
+                // 2. Fetch the recent batch of emails (Read or Unread)
                 const searchCriteria = ['ALL', ['SINCE', imapDate]];
                 const fetchOptions = { bodies: [''], markSeen: false }; 
                 const messages = await connection.search(searchCriteria, fetchOptions);
 
                 if (messages.length === 0) return;
+
+                // 3. Get TODAY'S date string strictly in Indian Standard Time (YYYY-MM-DD)
+                const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
                 
-                // Only log if we find emails we haven't processed yet
+                // Only log if we find emails we haven't processed yet to keep Render logs clean
                 const newMessages = messages.filter(m => !processedCache.has(m.attributes.uid));
                 if (newMessages.length > 0) {
-                    console.log(`📩 Found ${messages.length} total emails today. Processing ${newMessages.length} new ones...`);
+                    console.log(`📩 Found ${messages.length} total recent emails. Checking ${newMessages.length} unparsed ones against the IST Bouncer...`);
                 }
 
                 for (let item of messages) {
                     const uid = item.attributes.uid;
-                    if (processedCache.has(uid)) {
-                        continue; // Skip silently to keep logs clean
-                    }
+                    if (processedCache.has(uid)) continue; 
 
-                    // Parse the email body
                     const all = item.parts.find(part => part.which === '');
                     const parsedEmail = await simpleParser(all.body);
                     
+                    // 🛡️ THE DIGITAL BOUNCER: Check exact email arrival time in IST
+                    const emailDate = parsedEmail.date ? new Date(parsedEmail.date) : new Date();
+                    const emailDateIST = emailDate.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+
+                    // If the email date is older than today's date, skip it permanently!
+                    if (emailDateIST < todayIST) {
+                        processedCache.add(uid); // Mark as processed so we ignore it next time
+                        continue;
+                    }
+
                     const subject = parsedEmail.subject || "No Subject";
                     const from = parsedEmail.from?.text || "Unknown";
 
-                    // Ignore non-order emails
                     if (!subject.match(/Order|Booking|PNR|Reservation|Invoice|Bill|Catering/i)) {
-                        processedCache.add(uid); // Add to cache so we don't scan it again
+                        processedCache.add(uid);
                         continue;
                     }
 
                     console.log(`🤖 AI Analyzing: ${subject}`);
                     let fullText = parsedEmail.text || parsedEmail.html || "";
 
-                    // Extract PDF Attachments if any exist
                     if (parsedEmail.attachments && parsedEmail.attachments.length > 0) {
                         for (let att of parsedEmail.attachments) {
                             if (att.contentType === 'application/pdf') {
@@ -164,7 +171,7 @@ async function startImapPolling() {
         }, 20000); // 20 Second Loop
 
     } catch (error) {
-        console.error("❌ IMAP Connection Error. Check Email/Password:", error.message);
+        console.error("❌ IMAP Connection Error:", error.message);
     }
 }
 
