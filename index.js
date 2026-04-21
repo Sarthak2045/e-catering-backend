@@ -72,7 +72,7 @@ async function startImapPolling() {
         await connection.openBox('INBOX');
         console.log("✅ Connected! Watching for new orders strictly from TODAY onwards...");
 
-        // 🟢 THE FIX: Replaced setInterval with a self-calling async function
+        // 🟢 Replaced setInterval with a self-calling async function
         async function runPollingCycle() {
             try {
                 const bufferDate = new Date(Date.now() - 24 * 60 * 60 * 1000);
@@ -180,7 +180,7 @@ async function startImapPolling() {
 }
 
 // ==========================================
-// 🧠 AI PARSER (Strict Template Mode)
+// 🧠 AI PARSER (With Bracket Balancer)
 // ==========================================
 async function parseWithAI(rawText, subject, sender) {
     try {
@@ -216,19 +216,35 @@ async function parseWithAI(rawText, subject, sender) {
         const result = await model.generateContent(prompt);
         let text = result.response.text();
         
-        // 🧹 AGGRESSIVE CHATTER FILTER: Strip Markdown blocks first
+        // 🧹 Clean out any markdown blocks
         text = text.replace(/```json/gi, '').replace(/```/g, '').trim();
         
-        // Find the absolute first and last brackets
-        const jsonStartIndex = text.indexOf('{');
-        const jsonEndIndex = text.lastIndexOf('}');
-        
-        if (jsonStartIndex === -1 || jsonEndIndex === -1) {
-            console.error("   ❌ AI did not return a valid JSON structure.");
+        const startIndex = text.indexOf('{');
+        if (startIndex === -1) {
+            console.error("   ❌ AI did not return a JSON object.");
             return null;
         }
 
-        const pureJsonString = text.substring(jsonStartIndex, jsonEndIndex + 1);
+        // 🟢 THE BRACKET BALANCER: Isolates the exact first JSON object and ignores trailing garbage
+        let endIndex = -1;
+        let bracketCount = 0;
+        
+        for (let i = startIndex; i < text.length; i++) {
+            if (text[i] === '{') bracketCount++;
+            if (text[i] === '}') bracketCount--;
+            
+            if (bracketCount === 0) {
+                endIndex = i;
+                break;
+            }
+        }
+
+        if (endIndex === -1) {
+            console.error("   ❌ AI returned malformed JSON (missing closing bracket).");
+            return null;
+        }
+
+        const pureJsonString = text.substring(startIndex, endIndex + 1);
         const data = JSON.parse(pureJsonString);
 
         if (!data.orderNo && !data.pnr) return null;
