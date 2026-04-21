@@ -65,6 +65,9 @@ const IMAP_CONFIG = {
     }
 };
 
+// A simple function to act as our "Speed Limit"
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
 async function startImapPolling() {
     console.log("👀 AI AGENT: Connecting to Hotel Inbox...");
     try {
@@ -74,25 +77,21 @@ async function startImapPolling() {
 
         setInterval(async () => {
             try {
-                // 1. Give IMAP a 1-day buffer because Render runs on US Time (UTC)
                 const bufferDate = new Date(Date.now() - 24 * 60 * 60 * 1000);
                 const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
                 const imapDate = `${months[bufferDate.getMonth()]} ${bufferDate.getDate()}, ${bufferDate.getFullYear()}`;
 
-                // 2. Fetch the recent batch of emails (Read or Unread)
                 const searchCriteria = ['ALL', ['SINCE', imapDate]];
                 const fetchOptions = { bodies: [''], markSeen: false }; 
                 const messages = await connection.search(searchCriteria, fetchOptions);
 
                 if (messages.length === 0) return;
 
-                // 3. Get TODAY'S date string strictly in Indian Standard Time (YYYY-MM-DD)
                 const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
                 
-                // Only log if we find emails we haven't processed yet to keep Render logs clean
                 const newMessages = messages.filter(m => !processedCache.has(m.attributes.uid));
                 if (newMessages.length > 0) {
-                    console.log(`📩 Found ${messages.length} total recent emails. Checking ${newMessages.length} unparsed ones against the IST Bouncer...`);
+                    console.log(`📩 Found ${newMessages.length} unparsed emails. Processing slowly to avoid API limits...`);
                 }
 
                 for (let item of messages) {
@@ -102,13 +101,11 @@ async function startImapPolling() {
                     const all = item.parts.find(part => part.which === '');
                     const parsedEmail = await simpleParser(all.body);
                     
-                    // 🛡️ THE DIGITAL BOUNCER: Check exact email arrival time in IST
                     const emailDate = parsedEmail.date ? new Date(parsedEmail.date) : new Date();
                     const emailDateIST = emailDate.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 
-                    // If the email date is older than today's date, skip it permanently!
                     if (emailDateIST < todayIST) {
-                        processedCache.add(uid); // Mark as processed so we ignore it next time
+                        processedCache.add(uid); 
                         continue;
                     }
 
@@ -126,14 +123,16 @@ async function startImapPolling() {
                     if (parsedEmail.attachments && parsedEmail.attachments.length > 0) {
                         for (let att of parsedEmail.attachments) {
                             if (att.contentType === 'application/pdf') {
-                                console.log(`   📎 Found PDF! Reading content...`);
                                 try {
                                     const pdfData = await pdfParse(att.content);
                                     fullText += "\n\n--- PDF CONTENT ---\n" + pdfData.text;
-                                } catch (e) { console.log("   ⚠️ PDF Error:", e.message); }
+                                } catch (e) {}
                             }
                         }
                     }
+
+                    // 🛑 SPEED LIMIT ACTIVE: Pause for 4.5 seconds to stay under 15 requests/min
+                    await delay(4500);
 
                     // Send to Gemini
                     const orderData = await parseWithAI(fullText, subject, from);
@@ -161,14 +160,14 @@ async function startImapPolling() {
                         processedCache.add(uid);
 
                     } else {
-                        console.log("   ❌ AI Failed to extract data. Skipping.");
+                        console.log("   ❌ AI Failed to extract data cleanly. Skipping.");
                         processedCache.add(uid);
                     }
                 }
             } catch (err) {
                 console.error("⚠️ Polling Error:", err.message);
             }
-        }, 20000); // 20 Second Loop
+        }, 30000); // Increased polling loop to 30 seconds
 
     } catch (error) {
         console.error("❌ IMAP Connection Error:", error.message);
@@ -176,15 +175,16 @@ async function startImapPolling() {
 }
 
 // ==========================================
-// 🧠 AI PARSER
+// 🧠 AI PARSER (With Chatter Filter)
 // ==========================================
 async function parseWithAI(rawText, subject, sender) {
     try {
         const prompt = `
-        You are a JSON extractor. Extract catering order details from the email below.
+        You are a strict data extraction bot. Extract the catering order details from the email below.
         
         CRITICAL RULES:
         - Output ONLY valid JSON.
+        - Do not add any conversational text before or after the JSON.
         - "orderDate": Extract the Journey Date or Delivery Date. Format: "YYYY-MM-DD".
         - "orderTime": Extract the Delivery Time. Format: "HH:MM".
         - "items": Array of { "name": string, "quantity": number, "price": number }.
@@ -207,8 +207,18 @@ async function parseWithAI(rawText, subject, sender) {
 
         const result = await model.generateContent(prompt);
         let text = result.response.text();
-        text = text.replace(/```json/g, '').replace(/```/g, '').trim();
-        const data = JSON.parse(text);
+        
+        // 🧹 CHATTER FILTER: Find the first '{' and the last '}' and extract only what is inside
+        const jsonStartIndex = text.indexOf('{');
+        const jsonEndIndex = text.lastIndexOf('}');
+        
+        if (jsonStartIndex === -1 || jsonEndIndex === -1) {
+            console.error("   ❌ AI did not return brackets.");
+            return null;
+        }
+
+        const pureJsonString = text.substring(jsonStartIndex, jsonEndIndex + 1);
+        const data = JSON.parse(pureJsonString);
 
         if (!data.orderNo && !data.pnr) return null;
         return data;
