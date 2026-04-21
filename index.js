@@ -26,7 +26,7 @@ const HOTEL_EMAIL = process.env.HOTEL_EMAIL;
 const APP_PASSWORD = process.env.APP_PASSWORD; 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY; 
 
-const MODEL_NAME = "gemma-3-4b-it"; 
+const MODEL_NAME = "gemma-4-31b-it"; 
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: MODEL_NAME });
 
