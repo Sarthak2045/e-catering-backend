@@ -19,9 +19,8 @@ app.listen(PORT, () => {
 });
 
 // ==========================================
-// 🛠️ CONFIGURATION (SECURED FOR CLOUD)
+// 🛠️ CONFIGURATION
 // ==========================================
-// Pulling credentials from Render Environment Variables
 const HOTEL_EMAIL = process.env.HOTEL_EMAIL; 
 const APP_PASSWORD = process.env.APP_PASSWORD; 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY; 
@@ -30,10 +29,8 @@ const MODEL_NAME = "gemma-4-31b-it";
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: MODEL_NAME });
 
-// 🟢 MEMORY CACHE (Prevents Loops & Duplicates)
 const processedCache = new Set();
 
-// Smart Pathing: Uses Render's secure vault in the cloud, or local file on your PC
 const serviceAccount = process.env.RENDER 
   ? require('/etc/secrets/serviceAccountKey.json') 
   : require('./serviceAccountKey.json');
@@ -43,7 +40,6 @@ if (!admin.apps.length) {
 }
 const db = admin.firestore();
 
-// PDF Parsing Fallback
 let pdfParseLib = require('pdf-parse');
 let pdfParse = pdfParseLib.default || pdfParseLib;
 if (typeof pdfParse !== 'function') {
@@ -65,7 +61,6 @@ const IMAP_CONFIG = {
     }
 };
 
-// A simple function to act as our "Speed Limit"
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 async function startImapPolling() {
@@ -75,7 +70,8 @@ async function startImapPolling() {
         await connection.openBox('INBOX');
         console.log("✅ Connected! Watching for new orders strictly from TODAY onwards...");
 
-        setInterval(async () => {
+        // 🟢 THE FIX: Replaced setInterval with a self-calling async function
+        async function runPollingCycle() {
             try {
                 const bufferDate = new Date(Date.now() - 24 * 60 * 60 * 1000);
                 const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -85,89 +81,95 @@ async function startImapPolling() {
                 const fetchOptions = { bodies: [''], markSeen: false }; 
                 const messages = await connection.search(searchCriteria, fetchOptions);
 
-                if (messages.length === 0) return;
-
-                const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-                
-                const newMessages = messages.filter(m => !processedCache.has(m.attributes.uid));
-                if (newMessages.length > 0) {
-                    console.log(`📩 Found ${newMessages.length} unparsed emails. Processing slowly to avoid API limits...`);
-                }
-
-                for (let item of messages) {
-                    const uid = item.attributes.uid;
-                    if (processedCache.has(uid)) continue; 
-
-                    const all = item.parts.find(part => part.which === '');
-                    const parsedEmail = await simpleParser(all.body);
+                if (messages.length > 0) {
+                    const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
                     
-                    const emailDate = parsedEmail.date ? new Date(parsedEmail.date) : new Date();
-                    const emailDateIST = emailDate.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-
-                    if (emailDateIST < todayIST) {
-                        processedCache.add(uid); 
-                        continue;
+                    const newMessages = messages.filter(m => !processedCache.has(m.attributes.uid));
+                    if (newMessages.length > 0) {
+                        console.log(`📩 Found ${newMessages.length} unparsed emails. Processing slowly to avoid API limits...`);
                     }
 
-                    const subject = parsedEmail.subject || "No Subject";
-                    const from = parsedEmail.from?.text || "Unknown";
+                    for (let item of messages) {
+                        const uid = item.attributes.uid;
+                        if (processedCache.has(uid)) continue; 
 
-                    if (!subject.match(/Order|Booking|PNR|Reservation|Invoice|Bill|Catering/i)) {
-                        processedCache.add(uid);
-                        continue;
-                    }
+                        const all = item.parts.find(part => part.which === '');
+                        const parsedEmail = await simpleParser(all.body);
+                        
+                        const emailDate = parsedEmail.date ? new Date(parsedEmail.date) : new Date();
+                        const emailDateIST = emailDate.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 
-                    console.log(`🤖 AI Analyzing: ${subject}`);
-                    let fullText = parsedEmail.text || parsedEmail.html || "";
+                        if (emailDateIST < todayIST) {
+                            processedCache.add(uid); 
+                            continue;
+                        }
 
-                    if (parsedEmail.attachments && parsedEmail.attachments.length > 0) {
-                        for (let att of parsedEmail.attachments) {
-                            if (att.contentType === 'application/pdf') {
-                                try {
-                                    const pdfData = await pdfParse(att.content);
-                                    fullText += "\n\n--- PDF CONTENT ---\n" + pdfData.text;
-                                } catch (e) {}
+                        const subject = parsedEmail.subject || "No Subject";
+                        const from = parsedEmail.from?.text || "Unknown";
+
+                        if (!subject.match(/Order|Booking|PNR|Reservation|Invoice|Bill|Catering/i)) {
+                            processedCache.add(uid);
+                            continue;
+                        }
+
+                        console.log(`🤖 AI Analyzing: ${subject}`);
+                        let fullText = parsedEmail.text || parsedEmail.html || "";
+
+                        if (parsedEmail.attachments && parsedEmail.attachments.length > 0) {
+                            for (let att of parsedEmail.attachments) {
+                                if (att.contentType === 'application/pdf') {
+                                    try {
+                                        const pdfData = await pdfParse(att.content);
+                                        fullText += "\n\n--- PDF CONTENT ---\n" + pdfData.text;
+                                    } catch (e) {}
+                                }
                             }
                         }
-                    }
 
-                    // 🛑 SPEED LIMIT ACTIVE: Pause for 4.5 seconds to stay under 15 requests/min
-                    await delay(4500);
+                        // 🛑 THE SPEED LIMIT FIX: 6-second pause guarantees max 10 requests/min (Limit is 15)
+                        await delay(6000);
 
-                    // Send to Gemini
-                    const orderData = await parseWithAI(fullText, subject, from);
+                        // Send to Gemini
+                        const orderData = await parseWithAI(fullText, subject, from);
 
-                    if (orderData && (orderData.orderNo || orderData.pnr)) {
-                        let finalOrderNo = orderData.orderNo || orderData.pnr || `UNK_${Date.now()}`;
-                        finalOrderNo = finalOrderNo.toString().replace(/\//g, '-').trim();
-                        const cleanFloat = (val) => parseFloat((val || 0).toString().replace(/[^\d.]/g, '')) || 0;
+                        if (orderData && (orderData.orderNo || orderData.pnr)) {
+                            let finalOrderNo = orderData.orderNo || orderData.pnr || `UNK_${Date.now()}`;
+                            finalOrderNo = finalOrderNo.toString().replace(/\//g, '-').trim();
+                            const cleanFloat = (val) => parseFloat((val || 0).toString().replace(/[^\d.]/g, '')) || 0;
 
-                        // Save to Firebase
-                        await db.collection('orders').doc(finalOrderNo).set({
-                            ...orderData,
-                            subTotal: cleanFloat(orderData.subTotal),
-                            tax: cleanFloat(orderData.tax),
-                            deliveryCharge: cleanFloat(orderData.deliveryCharge),
-                            totalAmount: cleanFloat(orderData.totalAmount),
-                            remark: orderData.remark || "",
-                            orderNo: finalOrderNo,
-                            createdAt: new Date().toISOString(),
-                            status: 'Active',
-                            cancellationEmailSent: false
-                        });
+                            // Save to Firebase
+                            await db.collection('orders').doc(finalOrderNo).set({
+                                ...orderData,
+                                subTotal: cleanFloat(orderData.subTotal),
+                                tax: cleanFloat(orderData.tax),
+                                deliveryCharge: cleanFloat(orderData.deliveryCharge),
+                                totalAmount: cleanFloat(orderData.totalAmount),
+                                remark: orderData.remark || "",
+                                orderNo: finalOrderNo,
+                                createdAt: new Date().toISOString(),
+                                status: 'Active',
+                                cancellationEmailSent: false
+                            });
 
-                        console.log(`✅ SAVED: #${finalOrderNo} | Total: ₹${orderData.totalAmount}`);
-                        processedCache.add(uid);
+                            console.log(`✅ SAVED: #${finalOrderNo} | Total: ₹${orderData.totalAmount}`);
+                            processedCache.add(uid);
 
-                    } else {
-                        console.log("   ❌ AI Failed to extract data cleanly. Skipping.");
-                        processedCache.add(uid);
+                        } else {
+                            console.log("   ❌ AI Failed to extract data cleanly. Skipping.");
+                            processedCache.add(uid);
+                        }
                     }
                 }
             } catch (err) {
                 console.error("⚠️ Polling Error:", err.message);
             }
-        }, 30000); // Increased polling loop to 30 seconds
+
+            // 🟢 WAIT UNTIL BATCH FINISHES before starting the 30-second countdown again
+            setTimeout(runPollingCycle, 30000); 
+        }
+
+        // Kick off the first loop
+        runPollingCycle();
 
     } catch (error) {
         console.error("❌ IMAP Connection Error:", error.message);
@@ -175,7 +177,7 @@ async function startImapPolling() {
 }
 
 // ==========================================
-// 🧠 AI PARSER (With Chatter Filter)
+// 🧠 AI PARSER 
 // ==========================================
 async function parseWithAI(rawText, subject, sender) {
     try {
@@ -208,12 +210,10 @@ async function parseWithAI(rawText, subject, sender) {
         const result = await model.generateContent(prompt);
         let text = result.response.text();
         
-        // 🧹 CHATTER FILTER: Find the first '{' and the last '}' and extract only what is inside
         const jsonStartIndex = text.indexOf('{');
         const jsonEndIndex = text.lastIndexOf('}');
         
         if (jsonStartIndex === -1 || jsonEndIndex === -1) {
-            console.error("   ❌ AI did not return brackets.");
             return null;
         }
 
