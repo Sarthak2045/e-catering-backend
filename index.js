@@ -25,6 +25,7 @@ const HOTEL_EMAIL = process.env.HOTEL_EMAIL;
 const APP_PASSWORD = process.env.APP_PASSWORD; 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY; 
 
+// Upgraded to Gemma 4
 const MODEL_NAME = "gemma-4-31b-it"; 
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: MODEL_NAME });
@@ -61,6 +62,7 @@ const IMAP_CONFIG = {
     }
 };
 
+// Speed limit function
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 async function startImapPolling() {
@@ -99,6 +101,7 @@ async function startImapPolling() {
                         const emailDate = parsedEmail.date ? new Date(parsedEmail.date) : new Date();
                         const emailDateIST = emailDate.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 
+                        // 🛡️ THE DIGITAL BOUNCER
                         if (emailDateIST < todayIST) {
                             processedCache.add(uid); 
                             continue;
@@ -177,43 +180,51 @@ async function startImapPolling() {
 }
 
 // ==========================================
-// 🧠 AI PARSER 
+// 🧠 AI PARSER (Strict Template Mode)
 // ==========================================
 async function parseWithAI(rawText, subject, sender) {
     try {
         const prompt = `
-        You are a strict data extraction bot. Extract the catering order details from the email below.
-        
-        CRITICAL RULES:
-        - Output ONLY valid JSON.
-        - Do not add any conversational text before or after the JSON.
-        - "orderDate": Extract the Journey Date or Delivery Date. Format: "YYYY-MM-DD".
-        - "orderTime": Extract the Delivery Time. Format: "HH:MM".
-        - "items": Array of { "name": string, "quantity": number, "price": number }.
-        - "subTotal": Look for "Subtotal", "Net Amount", or sum of items. (Number only).
-        - "tax": Look for "GST", "IGST", "CGST", "SGST", or "VAT". (Number only).
-        - "deliveryCharge": Look for "Delivery Fee" or "Convenience Fee". (Number only).
-        - "totalAmount": Look for "Grand Total", "Total Payable", or "Final Amount". (Number only).
-        - "orderNo": The Order ID or PNR.
-        - "vendorName": Restaurant Name.
-        - "customerName": Passenger Name.
-        - "contactNo": Passenger Phone.
-        - "trainInfo": Train Number/Name.
-        - "coach": Coach/Seat.
-        - "paymentType": "COD" or "ONLINE".
-        - "remark": Look for "Customer Note", "Instructions", "Message", or "Remarks". (String, output "" if none found).
+        You are a strict data extraction API. Your ONLY job is to extract catering order details from the email text and return it as a SINGLE, VALID JSON object. 
+        DO NOT output schemas, types, or conversational text. ONLY output the final extracted data.
 
-        EMAIL TEXT:
+        JSON TEMPLATE (Use this exact structure, replace values with extracted data, use null or 0 if not found):
+        {
+          "orderDate": "YYYY-MM-DD",
+          "orderTime": "HH:MM",
+          "items": [
+            { "name": "Actual Food Name", "quantity": 1, "price": 150 }
+          ],
+          "subTotal": 0,
+          "tax": 0,
+          "deliveryCharge": 0,
+          "totalAmount": 0,
+          "orderNo": "12345",
+          "vendorName": "Restaurant Name",
+          "customerName": "Passenger Name",
+          "contactNo": "9876543210",
+          "trainInfo": "Train Number/Name",
+          "coach": "S1/45",
+          "paymentType": "COD",
+          "remark": ""
+        }
+
+        EMAIL TEXT TO PARSE:
         ${rawText.substring(0, 15000)}
         `;
 
         const result = await model.generateContent(prompt);
         let text = result.response.text();
         
+        // 🧹 AGGRESSIVE CHATTER FILTER: Strip Markdown blocks first
+        text = text.replace(/```json/gi, '').replace(/```/g, '').trim();
+        
+        // Find the absolute first and last brackets
         const jsonStartIndex = text.indexOf('{');
         const jsonEndIndex = text.lastIndexOf('}');
         
         if (jsonStartIndex === -1 || jsonEndIndex === -1) {
+            console.error("   ❌ AI did not return a valid JSON structure.");
             return null;
         }
 
