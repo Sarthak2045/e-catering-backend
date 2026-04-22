@@ -26,7 +26,7 @@ const APP_PASSWORD = process.env.APP_PASSWORD;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY; 
 
 // 🟢 USING THE FAST, STABLE FLASH MODEL
-const MODEL_NAME = "gemini-2.5-flash"; 
+const MODEL_NAME = "gemini-2.0-flash"; 
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
 // 🟢 ENFORCING OFFICIAL JSON MODE (No more conversational text from the AI)
