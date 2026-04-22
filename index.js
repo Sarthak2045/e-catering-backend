@@ -25,10 +25,17 @@ const HOTEL_EMAIL = process.env.HOTEL_EMAIL;
 const APP_PASSWORD = process.env.APP_PASSWORD; 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY; 
 
-// Upgraded to Gemma 4
+// 🟢 USING THE FAST, STABLE FLASH MODEL
 const MODEL_NAME = "gemini-2.5-flash"; 
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: MODEL_NAME });
+
+// 🟢 ENFORCING OFFICIAL JSON MODE (No more conversational text from the AI)
+const model = genAI.getGenerativeModel({ 
+    model: MODEL_NAME,
+    generationConfig: {
+        responseMimeType: "application/json",
+    }
+});
 
 const processedCache = new Set();
 
@@ -62,7 +69,6 @@ const IMAP_CONFIG = {
     }
 };
 
-// Speed limit function
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 async function startImapPolling() {
@@ -72,7 +78,6 @@ async function startImapPolling() {
         await connection.openBox('INBOX');
         console.log("✅ Connected! Watching for new orders strictly from TODAY onwards...");
 
-        // 🟢 Replaced setInterval with a self-calling async function
         async function runPollingCycle() {
             try {
                 const bufferDate = new Date(Date.now() - 24 * 60 * 60 * 1000);
@@ -101,7 +106,6 @@ async function startImapPolling() {
                         const emailDate = parsedEmail.date ? new Date(parsedEmail.date) : new Date();
                         const emailDateIST = emailDate.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 
-                        // 🛡️ THE DIGITAL BOUNCER
                         if (emailDateIST < todayIST) {
                             processedCache.add(uid); 
                             continue;
@@ -129,10 +133,9 @@ async function startImapPolling() {
                             }
                         }
 
-                        // 🛑 THE SPEED LIMIT FIX: 6-second pause guarantees max 10 requests/min (Limit is 15)
+                        // Pause 6 seconds to stay comfortably under 15 requests/min
                         await delay(6000);
 
-                        // Send to Gemini
                         const orderData = await parseWithAI(fullText, subject, from);
 
                         if (orderData && (orderData.orderNo || orderData.pnr)) {
@@ -140,7 +143,6 @@ async function startImapPolling() {
                             finalOrderNo = finalOrderNo.toString().replace(/\//g, '-').trim();
                             const cleanFloat = (val) => parseFloat((val || 0).toString().replace(/[^\d.]/g, '')) || 0;
 
-                            // Save to Firebase
                             await db.collection('orders').doc(finalOrderNo).set({
                                 ...orderData,
                                 subTotal: cleanFloat(orderData.subTotal),
@@ -167,11 +169,9 @@ async function startImapPolling() {
                 console.error("⚠️ Polling Error:", err.message);
             }
 
-            // 🟢 WAIT UNTIL BATCH FINISHES before starting the 30-second countdown again
             setTimeout(runPollingCycle, 30000); 
         }
 
-        // Kick off the first loop
         runPollingCycle();
 
     } catch (error) {
@@ -180,20 +180,19 @@ async function startImapPolling() {
 }
 
 // ==========================================
-// 🧠 AI PARSER (With Bracket Balancer)
+// 🧠 AI PARSER (With 503 Auto-Retry)
 // ==========================================
-async function parseWithAI(rawText, subject, sender) {
+async function parseWithAI(rawText, subject, sender, retries = 1) {
     try {
         const prompt = `
-        You are a strict data extraction API. Your ONLY job is to extract catering order details from the email text and return it as a SINGLE, VALID JSON object. 
-        DO NOT output schemas, types, or conversational text. ONLY output the final extracted data.
-
-        JSON TEMPLATE (Use this exact structure, replace values with extracted data, use null or 0 if not found):
+        Extract catering order details from the email text.
+        
+        Use this exact JSON schema:
         {
           "orderDate": "YYYY-MM-DD",
           "orderTime": "HH:MM",
           "items": [
-            { "name": "Actual Food Name", "quantity": 1, "price": 150 }
+            { "name": "Food Name", "quantity": 1, "price": 150 }
           ],
           "subTotal": 0,
           "tax": 0,
@@ -214,47 +213,22 @@ async function parseWithAI(rawText, subject, sender) {
         `;
 
         const result = await model.generateContent(prompt);
-        let text = result.response.text();
-        
-        // 🧹 Clean out any markdown blocks
-        text = text.replace(/```json/gi, '').replace(/```/g, '').trim();
-        
-        const startIndex = text.indexOf('{');
-        if (startIndex === -1) {
-            console.error("   ❌ AI did not return a JSON object.");
-            return null;
-        }
-
-        // 🟢 THE BRACKET BALANCER: Isolates the exact first JSON object and ignores trailing garbage
-        let endIndex = -1;
-        let bracketCount = 0;
-        
-        for (let i = startIndex; i < text.length; i++) {
-            if (text[i] === '{') bracketCount++;
-            if (text[i] === '}') bracketCount--;
-            
-            if (bracketCount === 0) {
-                endIndex = i;
-                break;
-            }
-        }
-
-        if (endIndex === -1) {
-            console.error("   ❌ AI returned malformed JSON (missing closing bracket).");
-            return null;
-        }
-
-        const pureJsonString = text.substring(startIndex, endIndex + 1);
-        const data = JSON.parse(pureJsonString);
+        const data = JSON.parse(result.response.text());
 
         if (!data.orderNo && !data.pnr) return null;
         return data;
 
     } catch (e) {
+        // 🟢 If Google is busy (503) and we haven't retried yet, wait 5 seconds and try again!
+        if (e.message.includes("503") && retries > 0) {
+            console.log("   ⏳ Google is busy (503). Waiting 5 seconds and retrying...");
+            await delay(5000); 
+            return parseWithAI(rawText, subject, sender, 0); // Try one last time
+        }
+        
         console.error(`   ❌ AI Parse Error:`, e.message);
         return null;
     }
 }
 
-// Start the engine
 startImapPolling();
