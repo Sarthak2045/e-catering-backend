@@ -26,7 +26,7 @@ const APP_PASSWORD = process.env.APP_PASSWORD;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY; 
 
 // Upgraded to Gemma 4
-const MODEL_NAME = "gemini-1.5-flash"; 
+const MODEL_NAME = "gemini-2.5-pro"; 
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: MODEL_NAME });
 
