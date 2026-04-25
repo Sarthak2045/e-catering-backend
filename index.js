@@ -208,7 +208,8 @@ async function parseWithAI(rawText, subject, sender, retries = 1) {
         // 🟢 THE NEW OPENROUTER API CALL
         const completion = await openai.chat.completions.create({
             model: MODEL_NAME,
-            response_format: { type: "json_object" }, // Forces perfect JSON formatting
+            response_format: { type: "json_object" },
+            max_tokens: 1500, // Forces perfect JSON formatting
             messages: [
               { role: "system", content: "You are a strict data extraction API. Your ONLY job is to extract catering order details from the user's text and return it as a SINGLE, VALID JSON object. DO NOT output schemas, types, or conversational text." },
               { role: "user", content: prompt }
