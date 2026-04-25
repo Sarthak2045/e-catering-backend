@@ -1,5 +1,5 @@
 const express = require('express');
-const { GoogleGenerativeAI } = require("@google/generative-ai");
+const OpenAI = require('openai'); // 🟢 SWAPPED TO OPENAI SDK FOR OPENROUTER
 const admin = require('firebase-admin');
 const imaps = require('imap-simple');
 const simpleParser = require('mailparser').simpleParser;
@@ -23,18 +23,13 @@ app.listen(PORT, () => {
 // ==========================================
 const HOTEL_EMAIL = process.env.HOTEL_EMAIL; 
 const APP_PASSWORD = process.env.APP_PASSWORD; 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY; 
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY; 
 
-// 🟢 USING THE FAST, STABLE FLASH MODEL
-const MODEL_NAME = "gemini-2.0-flash"; 
-const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-
-// 🟢 ENFORCING OFFICIAL JSON MODE (No more conversational text from the AI)
-const model = genAI.getGenerativeModel({ 
-    model: MODEL_NAME,
-    generationConfig: {
-        responseMimeType: "application/json",
-    }
+// 🟢 OPENROUTER SETUP (Using Llama 3 Free Tier)
+const MODEL_NAME = "meta-llama/llama-3-8b-instruct:free"; 
+const openai = new OpenAI({
+  baseURL: "https://openrouter.ai/api/v1",
+  apiKey: OPENROUTER_API_KEY,
 });
 
 const processedCache = new Set();
@@ -133,7 +128,7 @@ async function startImapPolling() {
                             }
                         }
 
-                        // Pause 6 seconds to stay comfortably under 15 requests/min
+                        // OpenRouter Free limit is 20 requests/minute. 6 seconds keeps us safe at 10/min.
                         await delay(6000);
 
                         const orderData = await parseWithAI(fullText, subject, from);
@@ -180,13 +175,11 @@ async function startImapPolling() {
 }
 
 // ==========================================
-// 🧠 AI PARSER (With 503 Auto-Retry)
+// 🧠 AI PARSER (OpenRouter / Llama 3)
 // ==========================================
 async function parseWithAI(rawText, subject, sender, retries = 1) {
     try {
         const prompt = `
-        Extract catering order details from the email text.
-        
         Use this exact JSON schema:
         {
           "orderDate": "YYYY-MM-DD",
@@ -212,18 +205,28 @@ async function parseWithAI(rawText, subject, sender, retries = 1) {
         ${rawText.substring(0, 15000)}
         `;
 
-        const result = await model.generateContent(prompt);
-        const data = JSON.parse(result.response.text());
+        // 🟢 THE NEW OPENROUTER API CALL
+        const completion = await openai.chat.completions.create({
+            model: MODEL_NAME,
+            response_format: { type: "json_object" }, // Forces perfect JSON formatting
+            messages: [
+              { role: "system", content: "You are a strict data extraction API. Your ONLY job is to extract catering order details from the user's text and return it as a SINGLE, VALID JSON object. DO NOT output schemas, types, or conversational text." },
+              { role: "user", content: prompt }
+            ]
+        });
+
+        // Parse the response from Llama 3
+        const data = JSON.parse(completion.choices[0].message.content);
 
         if (!data.orderNo && !data.pnr) return null;
         return data;
 
     } catch (e) {
-        // 🟢 If Google is busy (503) and we haven't retried yet, wait 5 seconds and try again!
-        if (e.message.includes("503") && retries > 0) {
-            console.log("   ⏳ Google is busy (503). Waiting 5 seconds and retrying...");
+        // Auto-Retry for OpenRouter Server Errors (502, 503, 429)
+        if ((e.status >= 500 || e.status === 429) && retries > 0) {
+            console.log(`   ⏳ OpenRouter Server Busy (${e.status}). Waiting 5 seconds and retrying...`);
             await delay(5000); 
-            return parseWithAI(rawText, subject, sender, 0); // Try one last time
+            return parseWithAI(rawText, subject, sender, 0); 
         }
         
         console.error(`   ❌ AI Parse Error:`, e.message);
