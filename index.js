@@ -26,7 +26,7 @@ const APP_PASSWORD = process.env.APP_PASSWORD;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY; 
 
 // 🟢 OPENROUTER SETUP (Using Llama 3 Free Tier)
-const MODEL_NAME = "google/gemma-4-31b-it:free"; 
+const MODEL_NAME = "google/gemini-2.5-flash"; 
 const openai = new OpenAI({
   baseURL: "https://openrouter.ai/api/v1",
   apiKey: OPENROUTER_API_KEY,
