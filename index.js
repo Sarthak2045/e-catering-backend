@@ -23,13 +23,13 @@ app.listen(PORT, () => {
 // ==========================================
 const HOTEL_EMAIL = process.env.HOTEL_EMAIL; 
 const APP_PASSWORD = process.env.APP_PASSWORD; 
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY; 
+const GROQ_API_KEY = process.env.GROQ_API_KEY; 
 
-// 🟢 OPENROUTER SETUP (Using Gemma 4)
-const MODEL_NAME = "google/gemma-4-26b-a4b-it:free"; 
+// 🟢 GROQ SETUP (Ultra-Fast Llama 3)
+const MODEL_NAME = "llama3-8b-8192"; 
 const openai = new OpenAI({
-  baseURL: "https://openrouter.ai/api/v1",
-  apiKey: OPENROUTER_API_KEY,
+  baseURL: "https://api.groq.com/openai/v1", // Pointing to Groq's servers
+  apiKey: GROQ_API_KEY,
 });
 
 const processedCache = new Set();
@@ -75,9 +75,8 @@ async function startImapPolling() {
 
         async function runPollingCycle() {
             try {
-                // 🟢 OPTIMIZATION: Only grab Unread emails
+                // 🟢 OPTIMIZATION: Only grab Unread emails & mark as Read instantly
                 const searchCriteria = ['UNSEEN']; 
-                // 🟢 OPTIMIZATION: Mark them as Read instantly so we never process them twice
                 const fetchOptions = { bodies: [''], markSeen: true }; 
                 
                 const messages = await connection.search(searchCriteria, fetchOptions);
@@ -87,7 +86,7 @@ async function startImapPolling() {
                     
                     const newMessages = messages.filter(m => !processedCache.has(m.attributes.uid));
                     if (newMessages.length > 0) {
-                        console.log(`📩 Found ${newMessages.length} unread emails. Processing slowly...`);
+                        console.log(`📩 Found ${newMessages.length} unread emails. Processing...`);
                     }
 
                     for (let item of messages) {
@@ -127,8 +126,8 @@ async function startImapPolling() {
                             }
                         }
 
-                        // OpenRouter delay to respect free tier RPM
-                        await delay(6000);
+                        // Groq gives you 30 requests per minute, so a 3-second delay is plenty safe
+                        await delay(3000);
 
                         const orderData = await parseWithAI(fullText, subject, from);
 
@@ -174,7 +173,7 @@ async function startImapPolling() {
 }
 
 // ==========================================
-// 🧠 AI PARSER (OpenRouter / Gemma 4)
+// 🧠 AI PARSER (Groq / Llama 3)
 // ==========================================
 async function parseWithAI(rawText, subject, sender, retries = 1) {
     try {
@@ -215,7 +214,6 @@ async function parseWithAI(rawText, subject, sender, retries = 1) {
         const completion = await openai.chat.completions.create({
             model: MODEL_NAME,
             response_format: { type: "json_object" }, 
-            max_tokens: 1500, // 🟢 Keeps you safely under memory limits to avoid 402s
             messages: [
               { role: "system", content: "You are a strict data extraction API. Your ONLY job is to extract catering order details and return them as a SINGLE, VALID JSON object. DO NOT output schemas, types, or conversational text." },
               { role: "user", content: prompt }
@@ -228,9 +226,8 @@ async function parseWithAI(rawText, subject, sender, retries = 1) {
         return data;
 
     } catch (e) {
-        // Auto-Retry for OpenRouter Server Errors (502, 503, 429)
         if ((e.status >= 500 || e.status === 429) && retries > 0) {
-            console.log(`   ⏳ OpenRouter Server Busy (${e.status}). Waiting 5 seconds and retrying...`);
+            console.log(`   ⏳ Groq Server Busy (${e.status}). Waiting 5 seconds and retrying...`);
             await delay(5000); 
             return parseWithAI(rawText, subject, sender, 0); 
         }
