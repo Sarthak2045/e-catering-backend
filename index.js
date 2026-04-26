@@ -25,8 +25,8 @@ const HOTEL_EMAIL = process.env.HOTEL_EMAIL;
 const APP_PASSWORD = process.env.APP_PASSWORD; 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY; 
 
-// 🟢 OPENROUTER SETUP (Using Google Gemini 2.5 Flash)
-const MODEL_NAME = "google/gemma-4-31b-it:free"; 
+// 🟢 OPENROUTER SETUP (Using Gemma 4)
+const MODEL_NAME = "google/gemma-4-26b-a4b-it:free"; 
 const openai = new OpenAI({
   baseURL: "https://openrouter.ai/api/v1",
   apiKey: OPENROUTER_API_KEY,
@@ -71,16 +71,15 @@ async function startImapPolling() {
     try {
         const connection = await imaps.connect(IMAP_CONFIG);
         await connection.openBox('INBOX');
-        console.log("✅ Connected! Watching for new orders strictly from TODAY onwards...");
+        console.log("✅ Connected! Watching for new UNREAD orders...");
 
         async function runPollingCycle() {
             try {
-                const bufferDate = new Date(Date.now() - 24 * 60 * 60 * 1000);
-                const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-                const imapDate = `${months[bufferDate.getMonth()]} ${bufferDate.getDate()}, ${bufferDate.getFullYear()}`;
-
-                const searchCriteria = ['ALL', ['SINCE', imapDate]];
-                const fetchOptions = { bodies: [''], markSeen: false }; 
+                // 🟢 OPTIMIZATION: Only grab Unread emails
+                const searchCriteria = ['UNSEEN']; 
+                // 🟢 OPTIMIZATION: Mark them as Read instantly so we never process them twice
+                const fetchOptions = { bodies: [''], markSeen: true }; 
+                
                 const messages = await connection.search(searchCriteria, fetchOptions);
 
                 if (messages.length > 0) {
@@ -88,7 +87,7 @@ async function startImapPolling() {
                     
                     const newMessages = messages.filter(m => !processedCache.has(m.attributes.uid));
                     if (newMessages.length > 0) {
-                        console.log(`📩 Found ${newMessages.length} unparsed emails. Processing slowly to avoid API limits...`);
+                        console.log(`📩 Found ${newMessages.length} unread emails. Processing slowly...`);
                     }
 
                     for (let item of messages) {
@@ -128,7 +127,7 @@ async function startImapPolling() {
                             }
                         }
 
-                        // OpenRouter Free limit is 20 requests/minute. 6 seconds keeps us safe at 10/min.
+                        // OpenRouter delay to respect free tier RPM
                         await delay(6000);
 
                         const orderData = await parseWithAI(fullText, subject, from);
@@ -175,7 +174,7 @@ async function startImapPolling() {
 }
 
 // ==========================================
-// 🧠 AI PARSER (OpenRouter / Gemini 2.5 Flash)
+// 🧠 AI PARSER (OpenRouter / Gemma 4)
 // ==========================================
 async function parseWithAI(rawText, subject, sender, retries = 1) {
     try {
@@ -216,7 +215,7 @@ async function parseWithAI(rawText, subject, sender, retries = 1) {
         const completion = await openai.chat.completions.create({
             model: MODEL_NAME,
             response_format: { type: "json_object" }, 
-            max_tokens: 500, // 🟢 Keeps you safely under memory limits
+            max_tokens: 1500, // 🟢 Keeps you safely under memory limits to avoid 402s
             messages: [
               { role: "system", content: "You are a strict data extraction API. Your ONLY job is to extract catering order details and return them as a SINGLE, VALID JSON object. DO NOT output schemas, types, or conversational text." },
               { role: "user", content: prompt }
