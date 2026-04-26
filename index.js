@@ -216,7 +216,7 @@ async function parseWithAI(rawText, subject, sender, retries = 1) {
         const completion = await openai.chat.completions.create({
             model: MODEL_NAME,
             response_format: { type: "json_object" }, 
-            max_tokens: 1000, // 🟢 Keeps you safely under memory limits
+            max_tokens: 500, // 🟢 Keeps you safely under memory limits
             messages: [
               { role: "system", content: "You are a strict data extraction API. Your ONLY job is to extract catering order details and return them as a SINGLE, VALID JSON object. DO NOT output schemas, types, or conversational text." },
               { role: "user", content: prompt }
