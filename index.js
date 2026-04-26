@@ -1,5 +1,5 @@
 const express = require('express');
-const OpenAI = require('openai'); // 🟢 SWAPPED TO OPENAI SDK FOR OPENROUTER
+const OpenAI = require('openai'); 
 const admin = require('firebase-admin');
 const imaps = require('imap-simple');
 const simpleParser = require('mailparser').simpleParser;
@@ -25,7 +25,7 @@ const HOTEL_EMAIL = process.env.HOTEL_EMAIL;
 const APP_PASSWORD = process.env.APP_PASSWORD; 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY; 
 
-// 🟢 OPENROUTER SETUP (Using Llama 3 Free Tier)
+// 🟢 OPENROUTER SETUP (Using Google Gemini 2.5 Flash)
 const MODEL_NAME = "google/gemini-2.5-flash"; 
 const openai = new OpenAI({
   baseURL: "https://openrouter.ai/api/v1",
@@ -175,11 +175,16 @@ async function startImapPolling() {
 }
 
 // ==========================================
-// 🧠 AI PARSER (OpenRouter / Llama 3)
+// 🧠 AI PARSER (OpenRouter / Gemini 2.5 Flash)
 // ==========================================
 async function parseWithAI(rawText, subject, sender, retries = 1) {
     try {
         const prompt = `
+        CRITICAL EXTRACTION RULES:
+        1. FIRST, analyze the "EMAIL SUBJECT" below to extract the "vendorName" (e.g., ZOOP, REL FOOD, Yatri Restro, Hotel Samrat) and the "orderNo" (Order ID / PNR / Invoice No). 
+        2. If they are not found in the subject, fallback to looking in the "EMAIL BODY".
+        3. Extract all remaining order details from the "EMAIL BODY".
+
         Use this exact JSON schema:
         {
           "orderDate": "YYYY-MM-DD",
@@ -201,22 +206,23 @@ async function parseWithAI(rawText, subject, sender, retries = 1) {
           "remark": ""
         }
 
-        EMAIL TEXT TO PARSE:
+        EMAIL SUBJECT: "${subject}"
+        SENDER: "${sender}"
+
+        EMAIL BODY:
         ${rawText.substring(0, 15000)}
         `;
 
-        // 🟢 THE NEW OPENROUTER API CALL
         const completion = await openai.chat.completions.create({
             model: MODEL_NAME,
-            response_format: { type: "json_object" },
-            max_tokens: 1500, // Forces perfect JSON formatting
+            response_format: { type: "json_object" }, 
+            max_tokens: 1500, // 🟢 Keeps you safely under memory limits
             messages: [
-              { role: "system", content: "You are a strict data extraction API. Your ONLY job is to extract catering order details from the user's text and return it as a SINGLE, VALID JSON object. DO NOT output schemas, types, or conversational text." },
+              { role: "system", content: "You are a strict data extraction API. Your ONLY job is to extract catering order details and return them as a SINGLE, VALID JSON object. DO NOT output schemas, types, or conversational text." },
               { role: "user", content: prompt }
             ]
         });
 
-        // Parse the response from Llama 3
         const data = JSON.parse(completion.choices[0].message.content);
 
         if (!data.orderNo && !data.pnr) return null;
