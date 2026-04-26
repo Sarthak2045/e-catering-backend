@@ -26,7 +26,7 @@ const APP_PASSWORD = process.env.APP_PASSWORD;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY; 
 
 // 🟢 OPENROUTER SETUP (Using Google Gemini 2.5 Flash)
-const MODEL_NAME = "google/gemini-2.5-flash"; 
+const MODEL_NAME = "google/gemma-4-31b-it:free"; 
 const openai = new OpenAI({
   baseURL: "https://openrouter.ai/api/v1",
   apiKey: OPENROUTER_API_KEY,
