@@ -71,13 +71,17 @@ async function startImapPolling() {
     try {
         const connection = await imaps.connect(IMAP_CONFIG);
         await connection.openBox('INBOX');
-        console.log("✅ Connected! Watching for new UNREAD orders...");
+        console.log("✅ Connected! Watching for ALL orders strictly from TODAY onwards...");
 
         async function runPollingCycle() {
             try {
-                // 🟢 OPTIMIZATION: Only grab Unread emails & mark as Read instantly
-                const searchCriteria = ['UNSEEN']; 
-                const fetchOptions = { bodies: [''], markSeen: true }; 
+                // 🟢 DATE-BASED LOGIC: Look at everything from the last 24 hours
+                const bufferDate = new Date(Date.now() - 24 * 60 * 60 * 1000);
+                const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+                const imapDate = `${months[bufferDate.getMonth()]} ${bufferDate.getDate()}, ${bufferDate.getFullYear()}`;
+
+                const searchCriteria = ['ALL', ['SINCE', imapDate]];
+                const fetchOptions = { bodies: [''], markSeen: false }; // Leaves emails marked as read/unread alone
                 
                 const messages = await connection.search(searchCriteria, fetchOptions);
 
@@ -86,7 +90,7 @@ async function startImapPolling() {
                     
                     const newMessages = messages.filter(m => !processedCache.has(m.attributes.uid));
                     if (newMessages.length > 0) {
-                        console.log(`📩 Found ${newMessages.length} unread emails. Processing...`);
+                        console.log(`📩 Found ${newMessages.length} unparsed emails from today. Processing...`);
                     }
 
                     for (let item of messages) {
@@ -126,7 +130,7 @@ async function startImapPolling() {
                             }
                         }
 
-                        // Groq gives you 30 requests per minute, so a 3-second delay is plenty safe
+                        // Groq limits you to 30 RPM, so a 3-second delay keeps the flow perfectly safe
                         await delay(3000);
 
                         const orderData = await parseWithAI(fullText, subject, from);
