@@ -26,7 +26,7 @@ const APP_PASSWORD = process.env.APP_PASSWORD;
 const GROQ_API_KEY = process.env.GROQ_API_KEY; 
 
 // 🟢 GROQ SETUP (Ultra-Fast Llama 3)
-const MODEL_NAME = "llama3-8b-8192"; 
+const MODEL_NAME = "llama-3.1-8b-instant"; 
 const openai = new OpenAI({
   baseURL: "https://api.groq.com/openai/v1", // Pointing to Groq's servers
   apiKey: GROQ_API_KEY,
