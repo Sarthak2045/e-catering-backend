@@ -19,36 +19,35 @@ app.listen(PORT, () => {
 });
 
 // ==========================================
-// 🛠️ THE 4-MODEL FALLBACK ARRAY
+// 🛠️ THE 4-MODEL FALLBACK ARRAY (High-Limit)
 // ==========================================
 const HOTEL_EMAIL = process.env.HOTEL_EMAIL; 
 const APP_PASSWORD = process.env.APP_PASSWORD; 
 
-// 🟢 THE FALLBACK ARRAY: High-Limit Heavyweights
 const AI_PROVIDERS = [
     {
         name: "Groq (Llama 3.1 8B)",
         baseURL: "https://api.groq.com/openai/v1",
         apiKey: process.env.GROQ_API_KEY,
-        model: "llama-3.1-8b-instant" // Fast, handles the initial load
+        model: "llama-3.1-8b-instant"
     },
     {
         name: "OpenRouter (Llama 3.1 8B Free)",
         baseURL: "https://openrouter.ai/api/v1",
         apiKey: process.env.OPENROUTER_API_KEY,
-        model: "meta-llama/llama-3.1-8b-instruct:free" // Solid backup
+        model: "meta-llama/llama-3.1-8b-instruct:free"
     },
     {
         name: "OpenRouter (Gemini 2.0 Flash Exp Free)",
         baseURL: "https://openrouter.ai/api/v1",
         apiKey: process.env.OPENROUTER_API_KEY,
-        model: "google/gemini-2.0-flash-exp:free" // Massive token limit, handles the heavy lifting
+        model: "google/gemini-2.0-flash-exp:free"
     },
     {
         name: "OpenRouter (Llama 3.3 70B Free)",
         baseURL: "https://openrouter.ai/api/v1",
         apiKey: process.env.OPENROUTER_API_KEY,
-        model: "meta-llama/llama-3.3-70b-instruct:free" // High IQ, great for complex extractions
+        model: "meta-llama/llama-3.3-70b-instruct:free" 
     }
 ];
 
@@ -70,7 +69,7 @@ if (typeof pdfParse !== 'function') {
 }
 
 // ==========================================
-// 🔄 IMAP CONNECTION & MAIN LOOP
+// 🔄 IMAP CONNECTION & STRICT DATE LOOP
 // ==========================================
 const IMAP_CONFIG = {
     imap: {
@@ -91,25 +90,23 @@ async function startImapPolling() {
     try {
         const connection = await imaps.connect(IMAP_CONFIG);
         await connection.openBox('INBOX');
-        console.log("✅ Connected! Watching for ALL orders strictly from TODAY onwards...");
+        console.log("✅ Connected! Strictly watching for orders from April 28, 2026 onwards...");
 
         async function runPollingCycle() {
             try {
-                const bufferDate = new Date(Date.now() - 24 * 60 * 60 * 1000);
-                const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-                const imapDate = `${months[bufferDate.getMonth()]} ${bufferDate.getDate()}, ${bufferDate.getFullYear()}`;
-
-                const searchCriteria = ['ALL', ['SINCE', imapDate]];
+                // 🟢 STRICT DATE CUTOFF: April 28, 2026, 12:00 AM IST
+                const CUTOFF_DATE = new Date('2026-04-28T00:00:00+05:30'); 
+                
+                // Tell IMAP to only bother fetching emails from Apr 28 onwards to save memory
+                const searchCriteria = ['ALL', ['SINCE', 'Apr 28, 2026']];
                 const fetchOptions = { bodies: [''], markSeen: false }; 
                 
                 const messages = await connection.search(searchCriteria, fetchOptions);
 
                 if (messages.length > 0) {
-                    const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-                    
                     const newMessages = messages.filter(m => !processedCache.has(m.attributes.uid));
                     if (newMessages.length > 0) {
-                        console.log(`📩 Found ${newMessages.length} unparsed emails from today. Processing...`);
+                        console.log(`📩 Found ${newMessages.length} unparsed emails. Checking timestamps...`);
                     }
 
                     for (let item of messages) {
@@ -119,23 +116,23 @@ async function startImapPolling() {
                         const all = item.parts.find(part => part.which === '');
                         const parsedEmail = await simpleParser(all.body);
                         
+                        // 🟢 JAVASCRIPT GATEKEEPER: Absolutely block anything before midnight April 28
                         const emailDate = parsedEmail.date ? new Date(parsedEmail.date) : new Date();
-                        const emailDateIST = emailDate.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-
-                        if (emailDateIST < todayIST) {
+                        if (emailDate < CUTOFF_DATE) {
                             processedCache.add(uid); 
                             continue;
                         }
 
                         const subject = parsedEmail.subject || "No Subject";
-                        const from = parsedEmail.from?.text || "Unknown";
+                        // Get the exact sender email address (e.g., orders@zoop.com)
+                        const fromAddress = parsedEmail.from?.value?.[0]?.address || parsedEmail.from?.text || "Unknown";
 
                         if (!subject.match(/Order|Booking|PNR|Reservation|Invoice|Bill|Catering/i)) {
                             processedCache.add(uid);
                             continue;
                         }
 
-                        console.log(`🤖 AI Analyzing: ${subject}`);
+                        console.log(`🤖 AI Analyzing: ${subject} (From: ${fromAddress})`);
                         let fullText = parsedEmail.text || parsedEmail.html || "";
 
                         if (parsedEmail.attachments && parsedEmail.attachments.length > 0) {
@@ -151,7 +148,8 @@ async function startImapPolling() {
 
                         await delay(3000);
 
-                        const orderData = await parseWithAI(fullText, subject, from);
+                        // Pass the exact sender address to the AI
+                        const orderData = await parseWithAI(fullText, subject, fromAddress);
 
                         if (orderData && (orderData.orderNo || orderData.pnr)) {
                             let finalOrderNo = orderData.orderNo || orderData.pnr || `UNK_${Date.now()}`;
@@ -171,7 +169,7 @@ async function startImapPolling() {
                                 cancellationEmailSent: false
                             });
 
-                            console.log(`✅ SAVED: #${finalOrderNo} | Total: ₹${orderData.totalAmount}`);
+                            console.log(`✅ SAVED: #${finalOrderNo} | Vendor: ${orderData.vendorName} | Total: ₹${orderData.totalAmount}`);
                             processedCache.add(uid);
 
                         } else {
@@ -197,12 +195,12 @@ async function startImapPolling() {
 // ==========================================
 // 🧠 AI PARSER (The Fallback Engine)
 // ==========================================
-async function parseWithAI(rawText, subject, sender) {
+async function parseWithAI(rawText, subject, senderEmail) {
     const prompt = `
     CRITICAL EXTRACTION RULES:
-    1. FIRST, analyze the "EMAIL SUBJECT" below to extract the "vendorName" (e.g., ZOOP, REL FOOD, Yatri Restro, Hotel Samrat) and the "orderNo" (Order ID / PNR / Invoice No). 
-    2. If they are not found in the subject, fallback to looking in the "EMAIL BODY".
-    3. Extract all remaining order details from the "EMAIL BODY".
+    1. SENDER EMAIL ANALYSIS: Look at the "SENDER EMAIL" below. Deduce the "vendorName" strictly from the domain or name in this email address (e.g., if it's info@zoopindia.com, the vendor is ZOOP. If it's orders@relfood.com, the vendor is REL FOOD).
+    2. ORDER NUMBER: Analyze the "EMAIL SUBJECT" and "EMAIL BODY" to extract the "orderNo" (Order ID / PNR / Invoice No). 
+    3. Extract all remaining order details strictly from the "EMAIL BODY".
 
     Use this exact JSON schema:
     {
@@ -225,18 +223,16 @@ async function parseWithAI(rawText, subject, sender) {
       "remark": ""
     }
 
+    SENDER EMAIL: "${senderEmail}"
     EMAIL SUBJECT: "${subject}"
-    SENDER: "${sender}"
-
+    
     EMAIL BODY:
     ${rawText.substring(0, 15000)}
     `;
 
-    // 🟢 Loop through our list of 4 providers
     for (let i = 0; i < AI_PROVIDERS.length; i++) {
         const config = AI_PROVIDERS[i];
         
-        // Skip this provider if its API key is missing from Render
         if (!config.apiKey) continue; 
 
         try {
@@ -245,7 +241,7 @@ async function parseWithAI(rawText, subject, sender) {
             const completion = await client.chat.completions.create({
                 model: config.model,
                 response_format: { type: "json_object" }, 
-                max_tokens: 1500, // Important for keeping OpenRouter happy
+                max_tokens: 1500, 
                 messages: [
                   { role: "system", content: "You are a strict data extraction API. Return a SINGLE, VALID JSON object." },
                   { role: "user", content: prompt }
@@ -255,20 +251,17 @@ async function parseWithAI(rawText, subject, sender) {
             const data = JSON.parse(completion.choices[0].message.content);
 
             if (!data.orderNo && !data.pnr) return null;
-            return data; // Success! Return the data and exit the fallback loop.
+            return data; 
 
         } catch (e) {
-            // If the model hits a rate limit (429) or is down (502/503), catch it and try the next one
             if (e.status === 429 || e.status >= 500) {
                 console.log(`   ⚠️ ${config.name} is busy or out of quota (${e.status}). Switching to next model...`);
                 continue; 
             }
-            
             console.error(`   ❌ ${config.name} Parse Error:`, e.message);
         }
     }
 
-    // If it gets down here, EVERY model in the array failed
     console.error("   🚨 FATAL: All 4 fallback AI models have exhausted their free tiers or failed.");
     return null;
 }
