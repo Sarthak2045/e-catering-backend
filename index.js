@@ -19,18 +19,38 @@ app.listen(PORT, () => {
 });
 
 // ==========================================
-// 🛠️ CONFIGURATION
+// 🛠️ THE 4-MODEL FALLBACK ARRAY
 // ==========================================
 const HOTEL_EMAIL = process.env.HOTEL_EMAIL; 
 const APP_PASSWORD = process.env.APP_PASSWORD; 
-const GROQ_API_KEY = process.env.GROQ_API_KEY; 
 
-// 🟢 GROQ SETUP (Ultra-Fast Llama 3)
-const MODEL_NAME = "llama-3.1-8b-instant"; 
-const openai = new OpenAI({
-  baseURL: "https://api.groq.com/openai/v1", // Pointing to Groq's servers
-  apiKey: GROQ_API_KEY,
-});
+// 🟢 THE FALLBACK ARRAY: High-Limit Heavyweights
+const AI_PROVIDERS = [
+    {
+        name: "Groq (Llama 3.1 8B)",
+        baseURL: "https://api.groq.com/openai/v1",
+        apiKey: process.env.GROQ_API_KEY,
+        model: "llama-3.1-8b-instant" // Fast, handles the initial load
+    },
+    {
+        name: "OpenRouter (Llama 3.1 8B Free)",
+        baseURL: "https://openrouter.ai/api/v1",
+        apiKey: process.env.OPENROUTER_API_KEY,
+        model: "meta-llama/llama-3.1-8b-instruct:free" // Solid backup
+    },
+    {
+        name: "OpenRouter (Gemini 2.0 Flash Exp Free)",
+        baseURL: "https://openrouter.ai/api/v1",
+        apiKey: process.env.OPENROUTER_API_KEY,
+        model: "google/gemini-2.0-flash-exp:free" // Massive token limit, handles the heavy lifting
+    },
+    {
+        name: "OpenRouter (Llama 3.3 70B Free)",
+        baseURL: "https://openrouter.ai/api/v1",
+        apiKey: process.env.OPENROUTER_API_KEY,
+        model: "meta-llama/llama-3.3-70b-instruct:free" // High IQ, great for complex extractions
+    }
+];
 
 const processedCache = new Set();
 
@@ -75,13 +95,12 @@ async function startImapPolling() {
 
         async function runPollingCycle() {
             try {
-                // 🟢 DATE-BASED LOGIC: Look at everything from the last 24 hours
                 const bufferDate = new Date(Date.now() - 24 * 60 * 60 * 1000);
                 const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
                 const imapDate = `${months[bufferDate.getMonth()]} ${bufferDate.getDate()}, ${bufferDate.getFullYear()}`;
 
                 const searchCriteria = ['ALL', ['SINCE', imapDate]];
-                const fetchOptions = { bodies: [''], markSeen: false }; // Leaves emails marked as read/unread alone
+                const fetchOptions = { bodies: [''], markSeen: false }; 
                 
                 const messages = await connection.search(searchCriteria, fetchOptions);
 
@@ -130,7 +149,6 @@ async function startImapPolling() {
                             }
                         }
 
-                        // Groq limits you to 30 RPM, so a 3-second delay keeps the flow perfectly safe
                         await delay(3000);
 
                         const orderData = await parseWithAI(fullText, subject, from);
@@ -157,7 +175,7 @@ async function startImapPolling() {
                             processedCache.add(uid);
 
                         } else {
-                            console.log("   ❌ AI Failed to extract data cleanly. Skipping.");
+                            console.log("   ❌ All AI Models Failed or text was unreadable. Skipping.");
                             processedCache.add(uid);
                         }
                     }
@@ -177,68 +195,82 @@ async function startImapPolling() {
 }
 
 // ==========================================
-// 🧠 AI PARSER (Groq / Llama 3)
+// 🧠 AI PARSER (The Fallback Engine)
 // ==========================================
-async function parseWithAI(rawText, subject, sender, retries = 1) {
-    try {
-        const prompt = `
-        CRITICAL EXTRACTION RULES:
-        1. FIRST, analyze the "EMAIL SUBJECT" below to extract the "vendorName" (e.g., ZOOP, REL FOOD, Yatri Restro, Hotel Samrat) and the "orderNo" (Order ID / PNR / Invoice No). 
-        2. If they are not found in the subject, fallback to looking in the "EMAIL BODY".
-        3. Extract all remaining order details from the "EMAIL BODY".
+async function parseWithAI(rawText, subject, sender) {
+    const prompt = `
+    CRITICAL EXTRACTION RULES:
+    1. FIRST, analyze the "EMAIL SUBJECT" below to extract the "vendorName" (e.g., ZOOP, REL FOOD, Yatri Restro, Hotel Samrat) and the "orderNo" (Order ID / PNR / Invoice No). 
+    2. If they are not found in the subject, fallback to looking in the "EMAIL BODY".
+    3. Extract all remaining order details from the "EMAIL BODY".
 
-        Use this exact JSON schema:
-        {
-          "orderDate": "YYYY-MM-DD",
-          "orderTime": "HH:MM",
-          "items": [
-            { "name": "Food Name", "quantity": 1, "price": 150 }
-          ],
-          "subTotal": 0,
-          "tax": 0,
-          "deliveryCharge": 0,
-          "totalAmount": 0,
-          "orderNo": "12345",
-          "vendorName": "Restaurant Name",
-          "customerName": "Passenger Name",
-          "contactNo": "9876543210",
-          "trainInfo": "Train Number/Name",
-          "coach": "S1/45",
-          "paymentType": "COD",
-          "remark": ""
-        }
-
-        EMAIL SUBJECT: "${subject}"
-        SENDER: "${sender}"
-
-        EMAIL BODY:
-        ${rawText.substring(0, 15000)}
-        `;
-
-        const completion = await openai.chat.completions.create({
-            model: MODEL_NAME,
-            response_format: { type: "json_object" }, 
-            messages: [
-              { role: "system", content: "You are a strict data extraction API. Your ONLY job is to extract catering order details and return them as a SINGLE, VALID JSON object. DO NOT output schemas, types, or conversational text." },
-              { role: "user", content: prompt }
-            ]
-        });
-
-        const data = JSON.parse(completion.choices[0].message.content);
-
-        if (!data.orderNo && !data.pnr) return null;
-        return data;
-
-    } catch (e) {
-        if ((e.status >= 500 || e.status === 429) && retries > 0) {
-            console.log(`   ⏳ Groq Server Busy (${e.status}). Waiting 5 seconds and retrying...`);
-            await delay(5000); 
-            return parseWithAI(rawText, subject, sender, 0); 
-        }
-        
-        console.error(`   ❌ AI Parse Error:`, e.message);
-        return null;
+    Use this exact JSON schema:
+    {
+      "orderDate": "YYYY-MM-DD",
+      "orderTime": "HH:MM",
+      "items": [
+        { "name": "Food Name", "quantity": 1, "price": 150 }
+      ],
+      "subTotal": 0,
+      "tax": 0,
+      "deliveryCharge": 0,
+      "totalAmount": 0,
+      "orderNo": "12345",
+      "vendorName": "Restaurant Name",
+      "customerName": "Passenger Name",
+      "contactNo": "9876543210",
+      "trainInfo": "Train Number/Name",
+      "coach": "S1/45",
+      "paymentType": "COD",
+      "remark": ""
     }
+
+    EMAIL SUBJECT: "${subject}"
+    SENDER: "${sender}"
+
+    EMAIL BODY:
+    ${rawText.substring(0, 15000)}
+    `;
+
+    // 🟢 Loop through our list of 4 providers
+    for (let i = 0; i < AI_PROVIDERS.length; i++) {
+        const config = AI_PROVIDERS[i];
+        
+        // Skip this provider if its API key is missing from Render
+        if (!config.apiKey) continue; 
+
+        try {
+            const client = new OpenAI({ baseURL: config.baseURL, apiKey: config.apiKey });
+            
+            const completion = await client.chat.completions.create({
+                model: config.model,
+                response_format: { type: "json_object" }, 
+                max_tokens: 1500, // Important for keeping OpenRouter happy
+                messages: [
+                  { role: "system", content: "You are a strict data extraction API. Return a SINGLE, VALID JSON object." },
+                  { role: "user", content: prompt }
+                ]
+            });
+
+            const data = JSON.parse(completion.choices[0].message.content);
+
+            if (!data.orderNo && !data.pnr) return null;
+            return data; // Success! Return the data and exit the fallback loop.
+
+        } catch (e) {
+            // If the model hits a rate limit (429) or is down (502/503), catch it and try the next one
+            if (e.status === 429 || e.status >= 500) {
+                console.log(`   ⚠️ ${config.name} is busy or out of quota (${e.status}). Switching to next model...`);
+                continue; 
+            }
+            
+            console.error(`   ❌ ${config.name} Parse Error:`, e.message);
+        }
+    }
+
+    // If it gets down here, EVERY model in the array failed
+    console.error("   🚨 FATAL: All 4 fallback AI models have exhausted their free tiers or failed.");
+    return null;
 }
 
 startImapPolling();
