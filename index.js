@@ -61,12 +61,15 @@ async function startImapPolling() {
     try {
         const connection = await imaps.connect(IMAP_CONFIG);
         await connection.openBox('INBOX');
-        console.log("✅ Connected! Strictly watching for orders from April 28, 2026 onwards...");
+        console.log("✅ Connected! Strictly watching for orders from May 1, 2026 onwards...");
 
         async function runPollingCycle() {
             try {
-                const CUTOFF_DATE = new Date('2026-04-28T00:00:00+05:30'); 
-                const searchCriteria = ['ALL', ['SINCE', 'Apr 28, 2026']];
+                // 🟢 STRICT DATE CUTOFF: May 1st, 2026, 12:00 AM IST
+                const CUTOFF_DATE = new Date('2026-05-01T00:00:00+05:30'); 
+                
+                // Tell IMAP to only fetch from May 1st
+                const searchCriteria = ['ALL', ['SINCE', 'May 01, 2026']];
                 const fetchOptions = { bodies: [''], markSeen: false }; 
                 
                 const messages = await connection.search(searchCriteria, fetchOptions);
@@ -84,6 +87,7 @@ async function startImapPolling() {
                         const all = item.parts.find(part => part.which === '');
                         const parsedEmail = await simpleParser(all.body);
                         
+                        // 🟢 JAVASCRIPT GATEKEEPER: Absolutely block anything before midnight May 1st
                         const emailDate = parsedEmail.date ? new Date(parsedEmail.date) : new Date();
                         if (emailDate < CUTOFF_DATE) {
                             processedCache.add(uid); 
@@ -203,7 +207,6 @@ async function parseWithAWS(rawText, subject, senderEmail) {
     `;
 
     try {
-        // Constructing the exact AWS Bedrock URL based on your ap-south-1 screenshot
         const modelId = "qwen.qwen3-vl-235b-a22b";
         const awsUrl = `https://bedrock-runtime.ap-south-1.amazonaws.com/model/${modelId}/converse`;
 
@@ -224,16 +227,12 @@ async function parseWithAWS(rawText, subject, senderEmail) {
 
         const result = await response.json();
 
-        // Catch AWS-specific rate limits or misconfigurations
         if (!response.ok) {
             console.error(`   ❌ AWS Error [${response.status}]:`, result.message || JSON.stringify(result));
             return null;
         }
 
-        // AWS Bedrock Converse API hides the text response here:
         const rawResponse = result.output.message.content[0].text;
-        
-        // Clean up markdown in case the model returns ```json
         const cleanResponse = rawResponse.replace(/```json/g, '').replace(/```/g, '').trim();
         const data = JSON.parse(cleanResponse);
 
