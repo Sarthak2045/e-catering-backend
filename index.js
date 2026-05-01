@@ -1,5 +1,4 @@
 const express = require('express');
-const OpenAI = require('openai'); 
 const admin = require('firebase-admin');
 const imaps = require('imap-simple');
 const simpleParser = require('mailparser').simpleParser;
@@ -19,38 +18,10 @@ app.listen(PORT, () => {
 });
 
 // ==========================================
-// 🛠️ THE 4-MODEL FALLBACK ARRAY (High-Limit)
+// 🛠️ FIREBASE & IMAP CONFIGURATION
 // ==========================================
 const HOTEL_EMAIL = process.env.HOTEL_EMAIL; 
 const APP_PASSWORD = process.env.APP_PASSWORD; 
-
-const AI_PROVIDERS = [
-    {
-        name: "Groq (Llama 3.1 8B)",
-        baseURL: "https://api.groq.com/openai/v1",
-        apiKey: process.env.GROQ_API_KEY,
-        model: "llama-3.1-8b-instant"
-    },
-    {
-        name: "OpenRouter (Llama 3.1 8B Free)",
-        baseURL: "https://openrouter.ai/api/v1",
-        apiKey: process.env.OPENROUTER_API_KEY,
-        model: "meta-llama/llama-3.1-8b-instruct:free"
-    },
-    {
-        name: "OpenRouter (Gemini 2.0 Flash Exp Free)",
-        baseURL: "https://openrouter.ai/api/v1",
-        apiKey: process.env.OPENROUTER_API_KEY,
-        model: "google/gemini-2.0-flash-exp:free"
-    },
-    {
-        name: "OpenRouter (Llama 3.3 70B Free)",
-        baseURL: "https://openrouter.ai/api/v1",
-        apiKey: process.env.OPENROUTER_API_KEY,
-        model: "meta-llama/llama-3.3-70b-instruct:free" 
-    }
-];
-
 const processedCache = new Set();
 
 const serviceAccount = process.env.RENDER 
@@ -68,9 +39,6 @@ if (typeof pdfParse !== 'function') {
     pdfParse = async () => ({ text: "" });
 }
 
-// ==========================================
-// 🔄 IMAP CONNECTION & STRICT DATE LOOP
-// ==========================================
 const IMAP_CONFIG = {
     imap: {
         user: HOTEL_EMAIL,
@@ -85,6 +53,9 @@ const IMAP_CONFIG = {
 
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
+// ==========================================
+// 🔄 IMAP CONNECTION & STRICT DATE LOOP
+// ==========================================
 async function startImapPolling() {
     console.log("👀 AI AGENT: Connecting to Hotel Inbox...");
     try {
@@ -94,10 +65,7 @@ async function startImapPolling() {
 
         async function runPollingCycle() {
             try {
-                // 🟢 STRICT DATE CUTOFF: April 28, 2026, 12:00 AM IST
                 const CUTOFF_DATE = new Date('2026-04-28T00:00:00+05:30'); 
-                
-                // Tell IMAP to only bother fetching emails from Apr 28 onwards to save memory
                 const searchCriteria = ['ALL', ['SINCE', 'Apr 28, 2026']];
                 const fetchOptions = { bodies: [''], markSeen: false }; 
                 
@@ -116,7 +84,6 @@ async function startImapPolling() {
                         const all = item.parts.find(part => part.which === '');
                         const parsedEmail = await simpleParser(all.body);
                         
-                        // 🟢 JAVASCRIPT GATEKEEPER: Absolutely block anything before midnight April 28
                         const emailDate = parsedEmail.date ? new Date(parsedEmail.date) : new Date();
                         if (emailDate < CUTOFF_DATE) {
                             processedCache.add(uid); 
@@ -124,7 +91,6 @@ async function startImapPolling() {
                         }
 
                         const subject = parsedEmail.subject || "No Subject";
-                        // Get the exact sender email address (e.g., orders@zoop.com)
                         const fromAddress = parsedEmail.from?.value?.[0]?.address || parsedEmail.from?.text || "Unknown";
 
                         if (!subject.match(/Order|Booking|PNR|Reservation|Invoice|Bill|Catering/i)) {
@@ -148,8 +114,7 @@ async function startImapPolling() {
 
                         await delay(3000);
 
-                        // Pass the exact sender address to the AI
-                        const orderData = await parseWithAI(fullText, subject, fromAddress);
+                        const orderData = await parseWithAWS(fullText, subject, fromAddress);
 
                         if (orderData && (orderData.orderNo || orderData.pnr)) {
                             let finalOrderNo = orderData.orderNo || orderData.pnr || `UNK_${Date.now()}`;
@@ -173,7 +138,7 @@ async function startImapPolling() {
                             processedCache.add(uid);
 
                         } else {
-                            console.log("   ❌ All AI Models Failed or text was unreadable. Skipping.");
+                            console.log("   ❌ AI Failed or text was unreadable. Skipping.");
                             processedCache.add(uid);
                         }
                     }
@@ -193,12 +158,19 @@ async function startImapPolling() {
 }
 
 // ==========================================
-// 🧠 AI PARSER (The Fallback Engine)
+// 🧠 AI PARSER (Native Amazon Bedrock)
 // ==========================================
-async function parseWithAI(rawText, subject, senderEmail) {
+async function parseWithAWS(rawText, subject, senderEmail) {
+    const awsToken = process.env.AWS_BEARER_TOKEN_BEDROCK;
+    
+    if (!awsToken) {
+        console.error("   🚨 Missing AWS_BEARER_TOKEN_BEDROCK in Render Environment Variables!");
+        return null;
+    }
+
     const prompt = `
     CRITICAL EXTRACTION RULES:
-    1. SENDER EMAIL ANALYSIS: Look at the "SENDER EMAIL" below. Deduce the "vendorName" strictly from the domain or name in this email address (e.g., if it's info@zoopindia.com, the vendor is ZOOP. If it's orders@relfood.com, the vendor is REL FOOD).
+    1. SENDER EMAIL ANALYSIS: Look at the "SENDER EMAIL" below. Deduce the "vendorName" strictly from the domain or name in this email address.
     2. ORDER NUMBER: Analyze the "EMAIL SUBJECT" and "EMAIL BODY" to extract the "orderNo" (Order ID / PNR / Invoice No). 
     3. Extract all remaining order details strictly from the "EMAIL BODY".
 
@@ -230,40 +202,48 @@ async function parseWithAI(rawText, subject, senderEmail) {
     ${rawText.substring(0, 15000)}
     `;
 
-    for (let i = 0; i < AI_PROVIDERS.length; i++) {
-        const config = AI_PROVIDERS[i];
-        
-        if (!config.apiKey) continue; 
+    try {
+        // Constructing the exact AWS Bedrock URL based on your ap-south-1 screenshot
+        const modelId = "qwen.qwen3-vl-235b-a22b";
+        const awsUrl = `https://bedrock-runtime.ap-south-1.amazonaws.com/model/${modelId}/converse`;
 
-        try {
-            const client = new OpenAI({ baseURL: config.baseURL, apiKey: config.apiKey });
-            
-            const completion = await client.chat.completions.create({
-                model: config.model,
-                response_format: { type: "json_object" }, 
-                max_tokens: 1500, 
-                messages: [
-                  { role: "system", content: "You are a strict data extraction API. Return a SINGLE, VALID JSON object." },
-                  { role: "user", content: prompt }
-                ]
-            });
+        const response = await fetch(awsUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${awsToken}`
+            },
+            body: JSON.stringify({
+                system: [{ text: "You are a strict data extraction API. Return a SINGLE, VALID JSON object without markdown formatting." }],
+                messages: [{
+                    role: "user",
+                    content: [{ text: prompt }]
+                }]
+            })
+        });
 
-            const data = JSON.parse(completion.choices[0].message.content);
+        const result = await response.json();
 
-            if (!data.orderNo && !data.pnr) return null;
-            return data; 
-
-        } catch (e) {
-            if (e.status === 429 || e.status >= 500) {
-                console.log(`   ⚠️ ${config.name} is busy or out of quota (${e.status}). Switching to next model...`);
-                continue; 
-            }
-            console.error(`   ❌ ${config.name} Parse Error:`, e.message);
+        // Catch AWS-specific rate limits or misconfigurations
+        if (!response.ok) {
+            console.error(`   ❌ AWS Error [${response.status}]:`, result.message || JSON.stringify(result));
+            return null;
         }
-    }
 
-    console.error("   🚨 FATAL: All 4 fallback AI models have exhausted their free tiers or failed.");
-    return null;
+        // AWS Bedrock Converse API hides the text response here:
+        const rawResponse = result.output.message.content[0].text;
+        
+        // Clean up markdown in case the model returns ```json
+        const cleanResponse = rawResponse.replace(/```json/g, '').replace(/```/g, '').trim();
+        const data = JSON.parse(cleanResponse);
+
+        if (!data.orderNo && !data.pnr) return null;
+        return data; 
+
+    } catch (e) {
+        console.error(`   ❌ AWS Parse Error:`, e.message);
+        return null;
+    }
 }
 
 startImapPolling();
