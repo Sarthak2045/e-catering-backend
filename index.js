@@ -61,12 +61,12 @@ async function startImapPolling() {
     try {
         const connection = await imaps.connect(IMAP_CONFIG);
         await connection.openBox('INBOX');
-        console.log("✅ Connected! Strictly watching for orders from May 2, 2026, 1:00 PM onwards...");
+        console.log("✅ Connected! Strictly watching for orders from May 2, 2026, 4:30 PM onwards...");
 
         async function runPollingCycle() {
             try {
-                // 🟢 STRICT DATE CUTOFF: May 2nd, 2026, 1:00 PM IST (13:00)
-                const CUTOFF_DATE = new Date('2026-05-02T13:00:00+05:30'); 
+                // 🟢 STRICT DATE CUTOFF: May 2nd, 2026, 4:30 PM IST (16:30)
+                const CUTOFF_DATE = new Date('2026-05-02T16:00:00+05:30'); 
                 
                 // Tell IMAP to only fetch from May 2nd onwards
                 const searchCriteria = ['ALL', ['SINCE', 'May 02, 2026']];
@@ -87,7 +87,7 @@ async function startImapPolling() {
                         const all = item.parts.find(part => part.which === '');
                         const parsedEmail = await simpleParser(all.body);
                         
-                        // 🟢 JAVASCRIPT GATEKEEPER: Block anything before exactly 1:00 PM May 2nd
+                        // 🟢 JAVASCRIPT GATEKEEPER: Block anything before exactly 4:30 PM May 2nd
                         const emailDate = parsedEmail.date ? new Date(parsedEmail.date) : new Date();
                         if (emailDate < CUTOFF_DATE) {
                             processedCache.add(uid); 
@@ -184,7 +184,8 @@ async function parseWithAWS(rawText, subject, senderEmail) {
     1. SENDER EMAIL ANALYSIS: Look at the "SENDER EMAIL" below. Deduce the "vendorName" strictly from the domain or name in this email address.
     2. ORDER NUMBER: Analyze the "EMAIL SUBJECT" and "EMAIL BODY" to extract the "orderNo" (Order ID / PNR / Invoice No). 
     3. 🔴 QUANTITY CHECK 🔴: Pay EXTREME attention to the quantity of food items. Look carefully for multipliers (e.g., "x3", "2x", "*4"), numbers written as words (e.g., "two", "three"), or specific "Qty" columns. NEVER default to 1 if a larger quantity is indicated anywhere near the item name.
-    4. Extract all remaining order details strictly from the "EMAIL BODY".
+    4. 🔴 SEAT & COACH CHECK 🔴: Scan the email carefully for Coach, Seat, or Berth numbers (e.g., "Coach: B4", "Seat: 12", "S1/45", "B-2, 43"). Extract this EXACTLY into the "coach" field. Do not miss this if it exists in the text.
+    5. Extract all remaining order details strictly from the "EMAIL BODY".
 
     Use this exact JSON schema:
     {
@@ -216,7 +217,6 @@ async function parseWithAWS(rawText, subject, senderEmail) {
 
     try {
         const modelId = "qwen.qwen3-vl-235b-a22b";
-        // 🟢 FIX: The correct standard string template for the AWS URL
         const awsUrl = `https://bedrock-runtime.ap-south-1.amazonaws.com/model/${modelId}/converse`;
 
         const response = await fetch(awsUrl, {
@@ -243,7 +243,8 @@ async function parseWithAWS(rawText, subject, senderEmail) {
 
         const rawResponse = result.output.message.content[0].text;
         
-        const cleanResponse = rawResponse.replace(/\`\`\`json/g, '').replace(/\`\`\`/g, '').trim();
+        // 🟢 FIX: 100% crash-proof cleanup. Splits the string to remove markdown blocks instead of using fragile Regex.
+        const cleanResponse = rawResponse.split('```json').join('').split('```').join('').trim();
         
         const data = JSON.parse(cleanResponse);
 
