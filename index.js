@@ -216,7 +216,7 @@ async function parseWithAWS(rawText, subject, senderEmail) {
 
     try {
         const modelId = "qwen.qwen3-vl-235b-a22b";
-        const awsUrl = `https://bedrock-runtime.ap-south-1.amazonaws.com/model/${modelId}/converse`;
+        const awsUrl = `[https://bedrock-runtime.ap-south-1.amazonaws.com/model/$](https://bedrock-runtime.ap-south-1.amazonaws.com/model/$){modelId}/converse`;
 
         const response = await fetch(awsUrl, {
             method: 'POST',
@@ -241,8 +241,10 @@ async function parseWithAWS(rawText, subject, senderEmail) {
         }
 
         const rawResponse = result.output.message.content[0].text;
-        const cleanResponse = rawResponse.replace(/```json/g, '').replace(/
-```/g, '').trim();
+        
+        // 🟢 FIX: Safely escaped regular expressions to prevent copy-paste crashes
+        const cleanResponse = rawResponse.replace(/\`\`\`json/g, '').replace(/\`\`\`/g, '').trim();
+        
         const data = JSON.parse(cleanResponse);
 
         if (!data.orderNo && !data.pnr) return null;
