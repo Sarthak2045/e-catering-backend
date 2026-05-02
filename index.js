@@ -65,10 +65,7 @@ async function startImapPolling() {
 
         async function runPollingCycle() {
             try {
-                // 🟢 STRICT DATE CUTOFF: May 1st, 2026, 12:00 AM IST
                 const CUTOFF_DATE = new Date('2026-05-01T00:00:00+05:30'); 
-                
-                // Tell IMAP to only fetch from May 1st
                 const searchCriteria = ['ALL', ['SINCE', 'May 01, 2026']];
                 const fetchOptions = { bodies: [''], markSeen: false }; 
                 
@@ -87,7 +84,6 @@ async function startImapPolling() {
                         const all = item.parts.find(part => part.which === '');
                         const parsedEmail = await simpleParser(all.body);
                         
-                        // 🟢 JAVASCRIPT GATEKEEPER: Absolutely block anything before midnight May 1st
                         const emailDate = parsedEmail.date ? new Date(parsedEmail.date) : new Date();
                         if (emailDate < CUTOFF_DATE) {
                             processedCache.add(uid); 
@@ -96,6 +92,13 @@ async function startImapPolling() {
 
                         const subject = parsedEmail.subject || "No Subject";
                         const fromAddress = parsedEmail.from?.value?.[0]?.address || parsedEmail.from?.text || "Unknown";
+
+                        // 🛑 THE ZOMATO BLOCKER
+                        if (fromAddress.toLowerCase().includes('zomato')) {
+                            console.log(`🚫 Blocked Zomato Email: ${subject} (Skipping AI Parse)`);
+                            processedCache.add(uid);
+                            continue;
+                        }
 
                         if (!subject.match(/Order|Booking|PNR|Reservation|Invoice|Bill|Catering/i)) {
                             processedCache.add(uid);
@@ -176,7 +179,8 @@ async function parseWithAWS(rawText, subject, senderEmail) {
     CRITICAL EXTRACTION RULES:
     1. SENDER EMAIL ANALYSIS: Look at the "SENDER EMAIL" below. Deduce the "vendorName" strictly from the domain or name in this email address.
     2. ORDER NUMBER: Analyze the "EMAIL SUBJECT" and "EMAIL BODY" to extract the "orderNo" (Order ID / PNR / Invoice No). 
-    3. Extract all remaining order details strictly from the "EMAIL BODY".
+    3. 🔴 QUANTITY CHECK 🔴: Pay EXTREME attention to the quantity of food items. Look carefully for multipliers (e.g., "x3", "2x", "*4"), numbers written as words (e.g., "two", "three"), or specific "Qty" columns. NEVER default to 1 if a larger quantity is indicated anywhere near the item name.
+    4. Extract all remaining order details strictly from the "EMAIL BODY".
 
     Use this exact JSON schema:
     {
