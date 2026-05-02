@@ -61,7 +61,7 @@ async function startImapPolling() {
     try {
         const connection = await imaps.connect(IMAP_CONFIG);
         await connection.openBox('INBOX');
-        console.log("✅ Connected! Strictly watching for orders from May 2, 2026, 4:30 PM onwards...");
+        console.log("✅ Connected! Strictly watching for orders from May 2, 2026, 4:00 PM onwards...");
 
         async function runPollingCycle() {
             try {
@@ -185,12 +185,12 @@ async function parseWithAWS(rawText, subject, senderEmail) {
     2. ORDER NUMBER: Analyze the "EMAIL SUBJECT" and "EMAIL BODY" to extract the "orderNo" (Order ID / PNR / Invoice No). 
     3. 🔴 QUANTITY CHECK 🔴: Pay EXTREME attention to the quantity of food items. Look carefully for multipliers (e.g., "x3", "2x", "*4"), numbers written as words (e.g., "two", "three"), or specific "Qty" columns. NEVER default to 1 if a larger quantity is indicated anywhere near the item name.
     4. 🔴 SEAT & COACH CHECK 🔴: Scan the email carefully for Coach, Seat, or Berth numbers (e.g., "Coach: B4", "Seat: 12", "S1/45", "B-2, 43"). Extract this EXACTLY into the "coach" field. Do not miss this if it exists in the text.
-    5. Extract all remaining order details strictly from the "EMAIL BODY".
+    5. 🔴 DELIVERY TIME CHECK 🔴: You must extract the scheduled "Delivery Date" (ETA / Journey Date) and "Delivery Time", NOT the time the order was placed or created.
 
     Use this exact JSON schema:
     {
-      "orderDate": "YYYY-MM-DD",
-      "orderTime": "HH:MM",
+      "deliveryDate": "YYYY-MM-DD",
+      "deliveryTime": "HH:MM",
       "items": [
         { "name": "Food Name", "quantity": 1, "price": 150 }
       ],
