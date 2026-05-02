@@ -61,12 +61,15 @@ async function startImapPolling() {
     try {
         const connection = await imaps.connect(IMAP_CONFIG);
         await connection.openBox('INBOX');
-        console.log("✅ Connected! Strictly watching for orders from May 1, 2026 onwards...");
+        console.log("✅ Connected! Strictly watching for orders from May 2, 2026, 1:00 PM onwards...");
 
         async function runPollingCycle() {
             try {
-                const CUTOFF_DATE = new Date('2026-05-01T00:00:00+05:30'); 
-                const searchCriteria = ['ALL', ['SINCE', 'May 01, 2026']];
+                // 🟢 STRICT DATE CUTOFF: May 2nd, 2026, 1:00 PM IST (13:00)
+                const CUTOFF_DATE = new Date('2026-05-02T13:00:00+05:30'); 
+                
+                // Tell IMAP to only fetch from May 2nd onwards
+                const searchCriteria = ['ALL', ['SINCE', 'May 02, 2026']];
                 const fetchOptions = { bodies: [''], markSeen: false }; 
                 
                 const messages = await connection.search(searchCriteria, fetchOptions);
@@ -84,6 +87,7 @@ async function startImapPolling() {
                         const all = item.parts.find(part => part.which === '');
                         const parsedEmail = await simpleParser(all.body);
                         
+                        // 🟢 JAVASCRIPT GATEKEEPER: Block anything before exactly 1:00 PM May 2nd
                         const emailDate = parsedEmail.date ? new Date(parsedEmail.date) : new Date();
                         if (emailDate < CUTOFF_DATE) {
                             processedCache.add(uid); 
@@ -237,7 +241,8 @@ async function parseWithAWS(rawText, subject, senderEmail) {
         }
 
         const rawResponse = result.output.message.content[0].text;
-        const cleanResponse = rawResponse.replace(/```json/g, '').replace(/```/g, '').trim();
+        const cleanResponse = rawResponse.replace(/```json/g, '').replace(/
+```/g, '').trim();
         const data = JSON.parse(cleanResponse);
 
         if (!data.orderNo && !data.pnr) return null;
