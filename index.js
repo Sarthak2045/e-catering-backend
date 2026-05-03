@@ -22,6 +22,8 @@ app.listen(PORT, () => {
 // ==========================================
 const HOTEL_EMAIL = process.env.HOTEL_EMAIL; 
 const APP_PASSWORD = process.env.APP_PASSWORD; 
+
+// Short-term memory (RAM)
 const processedCache = new Set();
 
 const serviceAccount = process.env.RENDER 
@@ -61,15 +63,13 @@ async function startImapPolling() {
     try {
         const connection = await imaps.connect(IMAP_CONFIG);
         await connection.openBox('INBOX');
-        console.log("✅ Connected! Strictly watching for orders from May 2, 2026, 4:00 PM onwards...");
+        console.log("✅ Connected! Watching for orders from May 3, 2026 onwards with Firebase UID locking...");
 
         async function runPollingCycle() {
             try {
-                // 🟢 STRICT DATE CUTOFF: May 2nd, 2026, 4:30 PM IST (16:30)
-                const CUTOFF_DATE = new Date('2026-05-02T16:00:00+05:30'); 
-                
-                // Tell IMAP to only fetch from May 2nd onwards
-                const searchCriteria = ['ALL', ['SINCE', 'May 02, 2026']];
+                // 🟢 STRICT DATE CUTOFF: Shifted to May 3rd
+                const CUTOFF_DATE = new Date('2026-05-03T14:00:00+05:30'); 
+                const searchCriteria = ['ALL', ['SINCE', 'May 03, 2026']];
                 const fetchOptions = { bodies: [''], markSeen: false }; 
                 
                 const messages = await connection.search(searchCriteria, fetchOptions);
@@ -77,17 +77,29 @@ async function startImapPolling() {
                 if (messages.length > 0) {
                     const newMessages = messages.filter(m => !processedCache.has(m.attributes.uid));
                     if (newMessages.length > 0) {
-                        console.log(`📩 Found ${newMessages.length} unparsed emails. Checking timestamps...`);
+                        console.log(`📩 Found ${newMessages.length} unparsed emails in inbox. Cross-referencing with Firebase memory...`);
                     }
 
                     for (let item of messages) {
                         const uid = item.attributes.uid;
+                        const uidStr = uid.toString();
+
+                        // 1. CHECK RAM (Short-term memory)
                         if (processedCache.has(uid)) continue; 
 
+                        // 2. CHECK FIREBASE (Long-term memory across server restarts)
+                        const emailRef = db.collection('processed_emails').doc(uidStr);
+                        const emailDoc = await emailRef.get();
+                        
+                        if (emailDoc.exists) {
+                            processedCache.add(uid); // Add to RAM so we don't query Firebase again
+                            continue; 
+                        }
+
+                        // If we are here, this is a BRAND NEW email the system has never seen.
                         const all = item.parts.find(part => part.which === '');
                         const parsedEmail = await simpleParser(all.body);
                         
-                        // 🟢 JAVASCRIPT GATEKEEPER: Block anything before exactly 4:30 PM May 2nd
                         const emailDate = parsedEmail.date ? new Date(parsedEmail.date) : new Date();
                         if (emailDate < CUTOFF_DATE) {
                             processedCache.add(uid); 
@@ -96,16 +108,20 @@ async function startImapPolling() {
 
                         const subject = parsedEmail.subject || "No Subject";
                         const fromAddress = parsedEmail.from?.value?.[0]?.address || parsedEmail.from?.text || "Unknown";
+                        const lowerFrom = fromAddress.toLowerCase();
 
-                        // 🛑 THE ZOMATO BLOCKER
-                        if (fromAddress.toLowerCase().includes('zomato')) {
-                            console.log(`🚫 Blocked Zomato Email: ${subject} (Skipping AI Parse)`);
+                        // 🛑 THE ZOMATO & IRCTC BLOCKER
+                        if (lowerFrom.includes('zomato') || lowerFrom.includes('irctc')) {
+                            console.log(`🚫 Blocked Ignored Sender: ${subject}`);
                             processedCache.add(uid);
+                            // Save to Firebase so we don't block it again next restart
+                            await emailRef.set({ status: 'ignored_sender', processedAt: new Date().toISOString() });
                             continue;
                         }
 
                         if (!subject.match(/Order|Booking|PNR|Reservation|Invoice|Bill|Catering/i)) {
                             processedCache.add(uid);
+                            await emailRef.set({ status: 'irrelevant_subject', processedAt: new Date().toISOString() });
                             continue;
                         }
 
@@ -132,6 +148,7 @@ async function startImapPolling() {
                             finalOrderNo = finalOrderNo.toString().replace(/\//g, '-').trim();
                             const cleanFloat = (val) => parseFloat((val || 0).toString().replace(/[^\d.]/g, '')) || 0;
 
+                            // 🟢 SAVE TO FIREBASE ORDERS
                             await db.collection('orders').doc(finalOrderNo).set({
                                 ...orderData,
                                 subTotal: cleanFloat(orderData.subTotal),
@@ -146,11 +163,16 @@ async function startImapPolling() {
                             });
 
                             console.log(`✅ SAVED: #${finalOrderNo} | Vendor: ${orderData.vendorName} | Total: ₹${orderData.totalAmount}`);
+                            
+                            // 🟢 LOCK THE UID IN FIREBASE FOREVER
                             processedCache.add(uid);
+                            await emailRef.set({ status: 'success', orderNo: finalOrderNo, processedAt: new Date().toISOString() });
 
                         } else {
                             console.log("   ❌ AI Failed or text was unreadable. Skipping.");
+                            // Lock it so AWS doesn't keep retrying a broken email
                             processedCache.add(uid);
+                            await emailRef.set({ status: 'failed_parse', processedAt: new Date().toISOString() });
                         }
                     }
                 }
@@ -243,7 +265,6 @@ async function parseWithAWS(rawText, subject, senderEmail) {
 
         const rawResponse = result.output.message.content[0].text;
         
-        // 🟢 FIX: 100% crash-proof cleanup. Splits the string to remove markdown blocks instead of using fragile Regex.
         const cleanResponse = rawResponse.split('```json').join('').split('```').join('').trim();
         
         const data = JSON.parse(cleanResponse);
