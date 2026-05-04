@@ -65,14 +65,15 @@ async function startImapPolling() {
     try {
         connection = await imaps.connect(IMAP_CONFIG);
         await connection.openBox('INBOX');
-        console.log("✅ Connected! Observer Mode: Watching ALL emails from May 3, 2026 onwards (No interference)...");
+        console.log("✅ Connected! Observer Mode: Watching ALL emails from May 4, 2026, 6:40 PM onwards...");
 
         async function runPollingCycle() {
             try {
-                const CUTOFF_DATE = new Date('2026-05-03T00:00:00+05:30'); 
+                // 🟢 STRICT DATE CUTOFF: Shifted to right now (May 4, 4:00 PM) so it ignores everything prior
+                const CUTOFF_DATE = new Date('2026-05-04T16:00:00+05:30'); 
                 
-                // 🟢 REVERTED TO 'ALL': Fetch everything, ignoring Read/Unread status so we don't conflict with the other system.
-                const searchCriteria = ['ALL', ['SINCE', 'May 03, 2026']];
+                // Fetch everything from May 4th, ignoring Read/Unread status
+                const searchCriteria = ['ALL', ['SINCE', 'May 04, 2026']];
                 
                 // Lightweight Scout Check (Strictly markSeen: false)
                 const fetchOptions = { bodies: ['HEADER.FIELDS (SUBJECT)'], markSeen: false }; 
@@ -101,7 +102,7 @@ async function startImapPolling() {
                             continue; 
                         }
 
-                        // 🟢 TARGETED DOWNLOAD: Keep markSeen: false so we DO NOT mark it as read!
+                        // TARGETED DOWNLOAD: Keep markSeen: false
                         console.log(`📥 Downloading payload for UID: ${uid}...`);
                         const fullMessage = await connection.search([['UID', uid]], { bodies: [''], markSeen: false });
                         
@@ -111,6 +112,7 @@ async function startImapPolling() {
                         const parsedEmail = await simpleParser(all.body);
                         
                         const emailDate = parsedEmail.date ? new Date(parsedEmail.date) : new Date();
+                        // 🟢 GATEKEEPER: Absolutely block anything before 6:40 PM today
                         if (emailDate < CUTOFF_DATE) {
                             processedCache.add(uid); 
                             continue;
@@ -172,7 +174,7 @@ async function startImapPolling() {
 
                             console.log(`✅ SAVED: #${finalOrderNo} | Vendor: ${orderData.vendorName} | Total: ₹${orderData.totalAmount}`);
                             
-                            // 🟢 LOCK THE UID IN FIREBASE ONLY
+                            // LOCK THE UID IN FIREBASE
                             processedCache.add(uid);
                             await emailRef.set({ status: 'success', orderNo: finalOrderNo, processedAt: new Date().toISOString() });
 
