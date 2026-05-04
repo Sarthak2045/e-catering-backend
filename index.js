@@ -56,48 +56,58 @@ const IMAP_CONFIG = {
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 // ==========================================
-// 🔄 IMAP CONNECTION & STRICT DATE LOOP
+// 🔄 IMAP CONNECTION & TARGETED POLLING
 // ==========================================
 async function startImapPolling() {
     console.log("👀 AI AGENT: Connecting to Hotel Inbox...");
+    let connection;
+
     try {
-        const connection = await imaps.connect(IMAP_CONFIG);
+        connection = await imaps.connect(IMAP_CONFIG);
         await connection.openBox('INBOX');
-        console.log("✅ Connected! Watching for orders from May 3, 2026 onwards with Firebase UID locking...");
+        console.log("✅ Connected! Observer Mode: Watching ALL emails from May 3, 2026 onwards (No interference)...");
 
         async function runPollingCycle() {
             try {
-                // 🟢 STRICT DATE CUTOFF: Shifted to May 3rd
-                const CUTOFF_DATE = new Date('2026-05-03T14:00:00+05:30'); 
-                const searchCriteria = ['ALL', ['SINCE', 'May 03, 2026']];
-                const fetchOptions = { bodies: [''], markSeen: false }; 
+                const CUTOFF_DATE = new Date('2026-05-03T00:00:00+05:30'); 
                 
-                const messages = await connection.search(searchCriteria, fetchOptions);
+                // 🟢 REVERTED TO 'ALL': Fetch everything, ignoring Read/Unread status so we don't conflict with the other system.
+                const searchCriteria = ['ALL', ['SINCE', 'May 03, 2026']];
+                
+                // Lightweight Scout Check (Strictly markSeen: false)
+                const fetchOptions = { bodies: ['HEADER.FIELDS (SUBJECT)'], markSeen: false }; 
+                
+                const searchPromise = connection.search(searchCriteria, fetchOptions);
+                const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("IMAP_HANG")), 15000));
+                
+                const messages = await Promise.race([searchPromise, timeoutPromise]);
 
                 if (messages.length > 0) {
                     const newMessages = messages.filter(m => !processedCache.has(m.attributes.uid));
                     if (newMessages.length > 0) {
-                        console.log(`📩 Found ${newMessages.length} unparsed emails in inbox. Cross-referencing with Firebase memory...`);
+                        console.log(`📩 Found ${newMessages.length} unparsed emails. Verifying with Firebase memory...`);
                     }
 
-                    for (let item of messages) {
+                    for (let item of newMessages) {
                         const uid = item.attributes.uid;
                         const uidStr = uid.toString();
 
-                        // 1. CHECK RAM (Short-term memory)
-                        if (processedCache.has(uid)) continue; 
-
-                        // 2. CHECK FIREBASE (Long-term memory across server restarts)
+                        // Check Firebase memory BEFORE downloading heavy data
                         const emailRef = db.collection('processed_emails').doc(uidStr);
                         const emailDoc = await emailRef.get();
                         
                         if (emailDoc.exists) {
-                            processedCache.add(uid); // Add to RAM so we don't query Firebase again
+                            processedCache.add(uid);
                             continue; 
                         }
 
-                        // If we are here, this is a BRAND NEW email the system has never seen.
-                        const all = item.parts.find(part => part.which === '');
+                        // 🟢 TARGETED DOWNLOAD: Keep markSeen: false so we DO NOT mark it as read!
+                        console.log(`📥 Downloading payload for UID: ${uid}...`);
+                        const fullMessage = await connection.search([['UID', uid]], { bodies: [''], markSeen: false });
+                        
+                        if (!fullMessage || fullMessage.length === 0) continue;
+
+                        const all = fullMessage[0].parts.find(part => part.which === '');
                         const parsedEmail = await simpleParser(all.body);
                         
                         const emailDate = parsedEmail.date ? new Date(parsedEmail.date) : new Date();
@@ -114,7 +124,6 @@ async function startImapPolling() {
                         if (lowerFrom.includes('zomato') || lowerFrom.includes('irctc')) {
                             console.log(`🚫 Blocked Ignored Sender: ${subject}`);
                             processedCache.add(uid);
-                            // Save to Firebase so we don't block it again next restart
                             await emailRef.set({ status: 'ignored_sender', processedAt: new Date().toISOString() });
                             continue;
                         }
@@ -148,7 +157,6 @@ async function startImapPolling() {
                             finalOrderNo = finalOrderNo.toString().replace(/\//g, '-').trim();
                             const cleanFloat = (val) => parseFloat((val || 0).toString().replace(/[^\d.]/g, '')) || 0;
 
-                            // 🟢 SAVE TO FIREBASE ORDERS
                             await db.collection('orders').doc(finalOrderNo).set({
                                 ...orderData,
                                 subTotal: cleanFloat(orderData.subTotal),
@@ -164,13 +172,12 @@ async function startImapPolling() {
 
                             console.log(`✅ SAVED: #${finalOrderNo} | Vendor: ${orderData.vendorName} | Total: ₹${orderData.totalAmount}`);
                             
-                            // 🟢 LOCK THE UID IN FIREBASE FOREVER
+                            // 🟢 LOCK THE UID IN FIREBASE ONLY
                             processedCache.add(uid);
                             await emailRef.set({ status: 'success', orderNo: finalOrderNo, processedAt: new Date().toISOString() });
 
                         } else {
                             console.log("   ❌ AI Failed or text was unreadable. Skipping.");
-                            // Lock it so AWS doesn't keep retrying a broken email
                             processedCache.add(uid);
                             await emailRef.set({ status: 'failed_parse', processedAt: new Date().toISOString() });
                         }
@@ -178,6 +185,19 @@ async function startImapPolling() {
                 }
             } catch (err) {
                 console.error("⚠️ Polling Error:", err.message);
+                
+                // Auto-reconnect logic
+                if (err.message === "IMAP_HANG" || err.message.includes("Not connected") || err.message.includes("Connection ended")) {
+                    console.log("🔄 Silent hang detected. Force restarting IMAP connection...");
+                    try { connection.end(); } catch(e){}
+                    try {
+                        connection = await imaps.connect(IMAP_CONFIG);
+                        await connection.openBox('INBOX');
+                        console.log("✅ Reconnected securely!");
+                    } catch(e) {
+                        console.error("❌ Reconnect failed, will try again next cycle:", e.message);
+                    }
+                }
             }
 
             setTimeout(runPollingCycle, 30000); 
