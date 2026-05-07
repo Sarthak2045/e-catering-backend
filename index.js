@@ -65,17 +65,16 @@ async function startImapPolling() {
     try {
         connection = await imaps.connect(IMAP_CONFIG);
         await connection.openBox('INBOX');
-        console.log("✅ Connected! Observer Mode: Watching ALL emails from May 4, 2026, 6:40 PM onwards...");
+        console.log("✅ Connected! Observer Mode: Strictly watching for emails from May 6, 2026, 7:00 PM onwards...");
 
         async function runPollingCycle() {
             try {
-                // 🟢 STRICT DATE CUTOFF: Shifted to right now (May 4, 4:00 PM) so it ignores everything prior
-                const CUTOFF_DATE = new Date('2026-05-04T16:00:00+05:30'); 
+                // 🟢 STRICT DATE CUTOFF: May 6, 2026 at 7:00 PM IST
+                const CUTOFF_DATE = new Date('2026-05-06T19:00:00+05:30'); 
                 
-                // Fetch everything from May 4th, ignoring Read/Unread status
-                const searchCriteria = ['ALL', ['SINCE', 'May 04, 2026']];
+                // 🟢 IMAP FETCH: Ask Gmail for everything starting May 6th
+                const searchCriteria = ['ALL', ['SINCE', 'May 06, 2026']];
                 
-                // Lightweight Scout Check (Strictly markSeen: false)
                 const fetchOptions = { bodies: ['HEADER.FIELDS (SUBJECT)'], markSeen: false }; 
                 
                 const searchPromise = connection.search(searchCriteria, fetchOptions);
@@ -86,14 +85,13 @@ async function startImapPolling() {
                 if (messages.length > 0) {
                     const newMessages = messages.filter(m => !processedCache.has(m.attributes.uid));
                     if (newMessages.length > 0) {
-                        console.log(`📩 Found ${newMessages.length} unparsed emails. Verifying with Firebase memory...`);
+                        console.log(`📩 Found ${newMessages.length} unparsed emails. Verifying dates & memory...`);
                     }
 
                     for (let item of newMessages) {
                         const uid = item.attributes.uid;
                         const uidStr = uid.toString();
 
-                        // Check Firebase memory BEFORE downloading heavy data
                         const emailRef = db.collection('processed_emails').doc(uidStr);
                         const emailDoc = await emailRef.get();
                         
@@ -102,7 +100,7 @@ async function startImapPolling() {
                             continue; 
                         }
 
-                        // TARGETED DOWNLOAD: Keep markSeen: false
+                        // TARGETED DOWNLOAD
                         console.log(`📥 Downloading payload for UID: ${uid}...`);
                         const fullMessage = await connection.search([['UID', uid]], { bodies: [''], markSeen: false });
                         
@@ -112,8 +110,10 @@ async function startImapPolling() {
                         const parsedEmail = await simpleParser(all.body);
                         
                         const emailDate = parsedEmail.date ? new Date(parsedEmail.date) : new Date();
-                        // 🟢 GATEKEEPER: Absolutely block anything before 6:40 PM today
+                        
+                        // 🛑 TIME BLOCKER: If the email is older than 7:00 PM on May 6th, instantly drop it
                         if (emailDate < CUTOFF_DATE) {
+                            console.log(`   ⏳ Skipping old email from ${emailDate.toLocaleString()}`);
                             processedCache.add(uid); 
                             continue;
                         }
@@ -122,7 +122,7 @@ async function startImapPolling() {
                         const fromAddress = parsedEmail.from?.value?.[0]?.address || parsedEmail.from?.text || "Unknown";
                         const lowerFrom = fromAddress.toLowerCase();
 
-                        // 🛑 THE ZOMATO & IRCTC BLOCKER
+                        // THE ZOMATO & IRCTC BLOCKER
                         if (lowerFrom.includes('zomato') || lowerFrom.includes('irctc')) {
                             console.log(`🚫 Blocked Ignored Sender: ${subject}`);
                             processedCache.add(uid);
@@ -174,7 +174,6 @@ async function startImapPolling() {
 
                             console.log(`✅ SAVED: #${finalOrderNo} | Vendor: ${orderData.vendorName} | Total: ₹${orderData.totalAmount}`);
                             
-                            // LOCK THE UID IN FIREBASE
                             processedCache.add(uid);
                             await emailRef.set({ status: 'success', orderNo: finalOrderNo, processedAt: new Date().toISOString() });
 
@@ -188,7 +187,6 @@ async function startImapPolling() {
             } catch (err) {
                 console.error("⚠️ Polling Error:", err.message);
                 
-                // Auto-reconnect logic
                 if (err.message === "IMAP_HANG" || err.message.includes("Not connected") || err.message.includes("Connection ended")) {
                     console.log("🔄 Silent hang detected. Force restarting IMAP connection...");
                     try { connection.end(); } catch(e){}
@@ -213,7 +211,7 @@ async function startImapPolling() {
 }
 
 // ==========================================
-// 🧠 AI PARSER (Native Amazon Bedrock)
+// 🧠 AI PARSER (11-Vendor Mapping + Validation)
 // ==========================================
 async function parseWithAWS(rawText, subject, senderEmail) {
     const awsToken = process.env.AWS_BEARER_TOKEN_BEDROCK;
@@ -223,16 +221,161 @@ async function parseWithAWS(rawText, subject, senderEmail) {
         return null;
     }
 
-    const prompt = `
-    CRITICAL EXTRACTION RULES:
-    1. SENDER EMAIL ANALYSIS: Look at the "SENDER EMAIL" below. Deduce the "vendorName" strictly from the domain or name in this email address.
-    2. ORDER NUMBER: Analyze the "EMAIL SUBJECT" and "EMAIL BODY" to extract the "orderNo" (Order ID / PNR / Invoice No). 
-    3. 🔴 QUANTITY CHECK 🔴: Pay EXTREME attention to the quantity of food items. Look carefully for multipliers (e.g., "x3", "2x", "*4"), numbers written as words (e.g., "two", "three"), or specific "Qty" columns. NEVER default to 1 if a larger quantity is indicated anywhere near the item name.
-    4. 🔴 SEAT & COACH CHECK 🔴: Scan the email carefully for Coach, Seat, or Berth numbers (e.g., "Coach: B4", "Seat: 12", "S1/45", "B-2, 43"). Extract this EXACTLY into the "coach" field. Do not miss this if it exists in the text.
-    5. 🔴 DELIVERY TIME CHECK 🔴: You must extract the scheduled "Delivery Date" (ETA / Journey Date) and "Delivery Time", NOT the time the order was placed or created.
+    const lowerFrom = senderEmail.toLowerCase();
+    
+    // 🔍 SENDER EMAIL → VENDOR MAPPING
+    const VENDOR_MAP = [
+        { match: 'relfood',       name: 'Rail Food',      type: 'railfood' },
+        { match: 'railfood',      name: 'Rail Food',      type: 'railfood' },
+        { match: 'zoop',          name: 'Zoop India',     type: 'zoop' },
+        { match: 'zoopindia',     name: 'Zoop India',     type: 'zoop' },
+        { match: 'yatrirestro',   name: 'Yatri Restro',   type: 'yatri_restro' },
+        { match: 'yatristro',     name: 'Yatri Restro',   type: 'yatri_restro' },
+        { match: 'yatribhojan',   name: 'YatriBhojan',    type: 'yatribhojan' },
+        { match: 'rajbhaog',      name: 'Rajbhog',        type: 'rajbhog' },
+        { match: 'rajbhog',       name: 'Rajbhog',        type: 'rajbhog' },
+        { match: 'homebytes',     name: 'Home Bytes',     type: 'homebytes' },
+        { match: 'railyatri',     name: 'RailYatri',      type: 'railyatri' },
+        { match: 'railreceipt',   name: 'Rail Receipt',   type: 'railreceipt' },
+        { match: 'rajdhani',      name: 'Rajdhani',       type: 'rajdhani' },
+        { match: 'dibrail',       name: 'Dibral',         type: 'dibrail' },
+        { match: 'spicywagon',    name: 'Spicywagon',     type: 'spicywagon' },
+    ];
 
-    Use this exact JSON schema:
+    let vendorName = "";
+    let vendorType = "generic";
+
+    for (const v of VENDOR_MAP) {
+        if (lowerFrom.includes(v.match)) {
+            vendorName = v.name;
+            vendorType = v.type;
+            break;
+        }
+    }
+
+    console.log(`   🏷️ Vendor detected: ${vendorName || 'Unknown'} (${vendorType})`);
+
+    // 🔧 FALLBACK: Extract vendor dynamically from root domain
+    if (!vendorName) {
+        try {
+            const domainParts = lowerFrom.split('@')[1]?.split('.') || [];
+            const rootDomain = domainParts.length > 2 ? domainParts[domainParts.length - 2] : domainParts[0];
+            vendorName = rootDomain.charAt(0).toUpperCase() + rootDomain.slice(1);
+        } catch(e) {}
+        console.log(`   ⚠️ Unknown vendor. Extracted name: ${vendorName}`);
+    }
+
+    const VENDOR_RULES = {
+        yatri_restro: `
+VENDOR: YATRI RESTRO
+TABLE: Item Description | ₹ Price | Quantity | ₹ Amount
+- Quantity is its OWN column. Numbers inside description (e.g. "4 Butter Roti") are ingredient counts, NOT quantity.
+- Date: DD-MM-YYYY → YYYY-MM-DD.
+`,
+        zoop: `
+VENDOR: ZOOP INDIA
+TABLE: Item Name | Price | Quantity | Amount
+- All plain numbers. Quantity is the 2nd number in the row.
+- Large quantities (10, 20) are common. Read exact digit.
+- Date: DD-Mon-YYYY → YYYY-MM-DD.
+`,
+        rajbhog: `
+VENDOR: RAJBHOG
+TABLE: SL# | Item Description | Qty | Price | GST | Amount
+- Numbers in parentheses like (4) in descriptions are ingredient counts, NOT item quantity.
+- Date: DD Mon YYYY → YYYY-MM-DD.
+`,
+        homebytes: `
+VENDOR: HOME BYTES
+TABLE: SL# | Item Description | Qty | Price | GST | Amount
+- Same as Rajbhog. Quantity is its own column.
+- Date: DD Mon YYYY → YYYY-MM-DD.
+`,
+        railyatri: `
+VENDOR: RAILYATRI
+FORMAT: Item | Quantity | Price
+- Quantity as "1 (1 * 159)" → first number is quantity.
+- Date: DD-MM-YYYY → YYYY-MM-DD.
+`,
+        railreceipt: `
+VENDOR: RAIL RECEIPT
+TABLE: Item Name | ₹ Price | Quantity | ₹ Amount
+- Quantity as "x1", "x2". Extract number after "x".
+- "(4PCS)", "(200G)" in descriptions are NOT quantity.
+- Date: Mon DD, YYYY → YYYY-MM-DD.
+`,
+        rajdhani: `
+VENDOR: RAJDHANI
+FORMAT: Quantity Item Name (QUANTITY FIRST)
+- "1 Veg Schezwan Rice" → qty=1, name="Veg Schezwan Rice"
+- Date: DD-MM-YYYY → YYYY-MM-DD.
+`,
+        railfood: `
+VENDOR: RAIL FOOD / REL FOOD
+FORMAT (2 lines per item):
+  Line 1: Item Name
+  Line 2: Weight Price Quantity Total
+- Example: "300gm 254 2 508" → Price=254, Qty=2, Total=508
+- "300gm", "1 Pcs" in description are NOT quantity.
+- VERIFY: Price × Qty = Total.
+- Date: M/D/YYYY → YYYY-MM-DD.
+`,
+        yatribhojan: `
+VENDOR: YATRIBHOJAN
+FORMAT: "Item Name X 3" → quantity is the number after "X" or "x"
+- Example: "Veg Hydrabadi Biriyani X 3" → qty=3
+- "NET TOTAL" = final amount.
+- Date: DD-MM-YYYY → YYYY-MM-DD.
+`,
+        dibrail: `
+VENDOR: DIBRAL
+FORMAT: "👉🏼 1-Jain Special Thali" → number before "-" is quantity
+- Example: "👉🏼 4-Tava Roti" → qty=4, name="Tava Roti"
+- Example: "👉🏼 1-Jain Special Thali" → qty=1, name="Jain Special Thali"
+- "Total Amount" = final amount.
+- Date: DD-MM-YYYY HH:MM → YYYY-MM-DD, HH:MM.
+`,
+        spicywagon: `
+VENDOR: SPICYWAGON
+FORMAT: "Item Name × 1" → quantity is the number after "×" or "x"
+- Example: "Saada Thali × 1" → qty=1
+- "NET TOTAL" = final amount.
+- Date: DD-MM-YY HH:MM AM/PM → YYYY-MM-DD, HH:MM (24hr).
+`,
+        generic: `
+GENERAL RULES:
+- Find items table. Read Quantity from its dedicated column.
+- Numbers in item descriptions are NOT quantity.
+- VERIFY: Price × Quantity = Amount for each item.
+`
+    };
+
+    const vendorRule = VENDOR_RULES[vendorType] || VENDOR_RULES.generic;
+
+    const prompt = `
+    You are a STRICT invoice/order parser. Extract data EXACTLY as shown.
+
+    IDENTIFIED VENDOR: ${vendorType}
+    VENDOR NAME (PRE-DETERMINED): "${vendorName}" — USE THIS EXACT VALUE.
+
+    ${vendorRule}
+
+    UNIVERSAL RULES:
+    1. 🔴 VENDOR NAME: Output "${vendorName}" exactly.
+    2. ORDER NUMBER: Order No, Txn No, Ref.No, Invoice, PNR, or # prefix. Strip # symbol.
+    3. 🔴🔴🔴 QUANTITY — MOST CRITICAL:
+       - Read quantity ONLY from the quantity column or explicit marker (X, ×, -prefix).
+       - Numbers inside descriptions ("4 Butter Roti", "3 Roti", "4PCS", "250gm") are NEVER the item quantity.
+       - VERIFY: Price × Quantity = Total/Amount for EACH item.
+    4. DATE FORMAT: Always "YYYY-MM-DD". Convert from any format.
+    5. DELIVERY TIME: Use Delivery ETA, NOT order creation time. Output "HH:MM" (24hr).
+    6. PHONE: 10-digit customer mobile.
+    7. COACH/SEAT: Exactly as shown (e.g. "S2/1", "B4/47", "M4-55").
+    8. PAYMENT: "COD" or "Cash on Delivery" → output "COD". "PRE_PAID"/"Online" → "Prepaid".
+
+    Use this EXACT JSON schema:
     {
+      "_thinking": "Step-by-step logic: Explain exactly how you found the quantity based on the vendor rule. Verify Price * Quantity.",
       "deliveryDate": "YYYY-MM-DD",
       "deliveryTime": "HH:MM",
       "items": [
@@ -243,18 +386,18 @@ async function parseWithAWS(rawText, subject, senderEmail) {
       "deliveryCharge": 0,
       "totalAmount": 0,
       "orderNo": "12345",
-      "vendorName": "Restaurant Name",
+      "vendorName": "${vendorName}",
       "customerName": "Passenger Name",
       "contactNo": "9876543210",
       "trainInfo": "Train Number/Name",
-      "coach": "S1/45",
+      "coach": "S2/1",
       "paymentType": "COD",
       "remark": ""
     }
 
     SENDER EMAIL: "${senderEmail}"
     EMAIL SUBJECT: "${subject}"
-    
+
     EMAIL BODY:
     ${rawText.substring(0, 15000)}
     `;
@@ -271,10 +414,7 @@ async function parseWithAWS(rawText, subject, senderEmail) {
             },
             body: JSON.stringify({
                 system: [{ text: "You are a strict data extraction API. Return a SINGLE, VALID JSON object without markdown formatting." }],
-                messages: [{
-                    role: "user",
-                    content: [{ text: prompt }]
-                }]
+                messages: [{ role: "user", content: [{ text: prompt }] }]
             })
         });
 
@@ -286,13 +426,41 @@ async function parseWithAWS(rawText, subject, senderEmail) {
         }
 
         const rawResponse = result.output.message.content[0].text;
-        
         const cleanResponse = rawResponse.split('```json').join('').split('```').join('').trim();
-        
         const data = JSON.parse(cleanResponse);
 
         if (!data.orderNo && !data.pnr) return null;
-        return data; 
+
+        data.vendorName = vendorName;
+
+        // 🔍 ACTIVE MATH VALIDATION & AUTO-CORRECTION
+        if (data.items && Array.isArray(data.items)) {
+            console.log("   🔍 Validating item math...");
+            let calculatedSubTotal = 0;
+
+            for (const item of data.items) {
+                item.quantity = parseInt(item.quantity, 10);
+                item.price = parseFloat(item.price);
+
+                if (item.quantity <= 0 || isNaN(item.quantity)) {
+                    console.error(`      ⚠️ INVALID qty for "${item.name}". Resetting to 1.`);
+                    item.quantity = 1;
+                }
+                
+                const lineTotal = item.price * item.quantity;
+                calculatedSubTotal += lineTotal;
+                console.log(`      ${item.name}: ₹${item.price} × ${item.quantity} = ₹${lineTotal}`);
+            }
+
+            // Fallback safety: Overwrite hallucinated subtotals
+            const parsedSubTotal = parseFloat(data.subTotal) || 0;
+            if (Math.abs(parsedSubTotal - calculatedSubTotal) > 5) { 
+                 console.log(`      ⚠️ SubTotal Mismatch! AI said ₹${parsedSubTotal}, Real Math is ₹${calculatedSubTotal}. Correcting.`);
+                 data.subTotal = calculatedSubTotal;
+            }
+        }
+
+        return data;
 
     } catch (e) {
         console.error(`   ❌ AWS Parse Error:`, e.message);
