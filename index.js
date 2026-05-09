@@ -65,15 +65,15 @@ async function startImapPolling() {
     try {
         connection = await imaps.connect(IMAP_CONFIG);
         await connection.openBox('INBOX');
-        console.log("✅ Connected! Observer Mode: Strictly watching for emails from May 6, 2026, 7:00 PM onwards...");
+        console.log("✅ Connected! Observer Mode: Strictly watching for emails from May 9, 2026, 12:00 AM onwards...");
 
         async function runPollingCycle() {
             try {
-                // 🟢 STRICT DATE CUTOFF: May 6, 2026 at 7:00 PM IST
-                const CUTOFF_DATE = new Date('2026-05-06T19:00:00+05:30'); 
+                // 🟢 STRICT DATE CUTOFF: May 9, 2026 at 12:00 AM IST (Midnight)
+                const CUTOFF_DATE = new Date('2026-05-09T00:00:00+05:30'); 
                 
-                // 🟢 IMAP FETCH: Ask Gmail for everything starting May 6th
-                const searchCriteria = ['ALL', ['SINCE', 'May 06, 2026']];
+                // 🟢 IMAP FETCH: Ask Gmail for everything starting May 9th
+                const searchCriteria = ['ALL', ['SINCE', 'May 09, 2026']];
                 
                 const fetchOptions = { bodies: ['HEADER.FIELDS (SUBJECT)'], markSeen: false }; 
                 
@@ -111,10 +111,14 @@ async function startImapPolling() {
                         
                         const emailDate = parsedEmail.date ? new Date(parsedEmail.date) : new Date();
                         
-                        // 🛑 TIME BLOCKER: If the email is older than 7:00 PM on May 6th, instantly drop it
+                        // 🛑 TIME BLOCKER & QUOTA FIX: If the email is older than midnight May 9th, drop it & lock in Firebase
                         if (emailDate < CUTOFF_DATE) {
                             console.log(`   ⏳ Skipping old email from ${emailDate.toLocaleString()}`);
                             processedCache.add(uid); 
+                            
+                            // 🟢 THE CRITICAL FIX: Saves skipped status to Firebase to prevent infinite reads on restart
+                            await emailRef.set({ status: 'old_date_skipped', processedAt: new Date().toISOString() });
+                            
                             continue;
                         }
 
