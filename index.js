@@ -23,7 +23,6 @@ app.listen(PORT, () => {
 const HOTEL_EMAIL = process.env.HOTEL_EMAIL; 
 const APP_PASSWORD = process.env.APP_PASSWORD; 
 
-// Short-term memory (RAM)
 const processedCache = new Set();
 
 const serviceAccount = process.env.RENDER 
@@ -64,16 +63,25 @@ async function startImapPolling() {
 
     try {
         connection = await imaps.connect(IMAP_CONFIG);
+        
+        // 🛡️ BACKGROUND ERROR SHIELD: Catch random disconnects gracefully
+        connection.on('error', (err) => {
+            console.error("⚠️ Background IMAP Socket Error (Handled):", err.message);
+        });
+        connection.on('end', () => {
+            console.log("⚠️ IMAP Connection ended by server.");
+        });
+
         await connection.openBox('INBOX');
-        console.log("✅ Connected! Observer Mode: Strictly watching for emails from May 9, 2026, 12:00 AM onwards...");
+        console.log("✅ Connected! Observer Mode: Strictly watching for UNREAD emails from May 18, 2026, 6:00 PM onwards...");
 
         async function runPollingCycle() {
             try {
-                // 🟢 STRICT DATE CUTOFF: May 9, 2026 at 12:00 AM IST (Midnight)
-                const CUTOFF_DATE = new Date('2026-05-09T00:00:00+05:30'); 
+                // 🟢 STRICT DATE CUTOFF: May 18, 2026 at 6:00 PM IST
+                const CUTOFF_DATE = new Date('2026-05-18T18:00:00+05:30'); 
                 
-                // 🟢 IMAP FETCH: Ask Gmail for everything starting May 9th
-                const searchCriteria = ['ALL', ['SINCE', 'May 09, 2026']];
+                // 🟢 STRICT UNSEEN FILTER: Only fetch emails that are marked as Unread in Gmail
+                const searchCriteria = ['UNSEEN', ['SINCE', 'May 18, 2026']];
                 
                 const fetchOptions = { bodies: ['HEADER.FIELDS (SUBJECT)'], markSeen: false }; 
                 
@@ -84,107 +92,106 @@ async function startImapPolling() {
 
                 if (messages.length > 0) {
                     const newMessages = messages.filter(m => !processedCache.has(m.attributes.uid));
+                    
                     if (newMessages.length > 0) {
-                        console.log(`📩 Found ${newMessages.length} unparsed emails. Verifying dates & memory...`);
-                    }
-
-                    for (let item of newMessages) {
-                        const uid = item.attributes.uid;
-                        const uidStr = uid.toString();
-
-                        const emailRef = db.collection('processed_emails').doc(uidStr);
-                        const emailDoc = await emailRef.get();
+                        // 🟢 BATCH PROCESSING: Slice the backlog into safe chunks to prevent IMAP timeouts
+                        const BATCH_SIZE = 15;
+                        const currentBatch = newMessages.slice(0, BATCH_SIZE);
                         
-                        if (emailDoc.exists) {
-                            processedCache.add(uid);
-                            continue; 
-                        }
+                        console.log(`📩 Inbox has ${newMessages.length} pending emails. Processing a safe batch of ${currentBatch.length}...`);
 
-                        // TARGETED DOWNLOAD
-                        console.log(`📥 Downloading payload for UID: ${uid}...`);
-                        const fullMessage = await connection.search([['UID', uid]], { bodies: [''], markSeen: false });
-                        
-                        if (!fullMessage || fullMessage.length === 0) continue;
+                        for (let item of currentBatch) {
+                            const uid = item.attributes.uid;
+                            const uidStr = uid.toString();
 
-                        const all = fullMessage[0].parts.find(part => part.which === '');
-                        const parsedEmail = await simpleParser(all.body);
-                        
-                        const emailDate = parsedEmail.date ? new Date(parsedEmail.date) : new Date();
-                        
-                        // 🛑 TIME BLOCKER & QUOTA FIX: If the email is older than midnight May 9th, drop it & lock in Firebase
-                        if (emailDate < CUTOFF_DATE) {
-                            console.log(`   ⏳ Skipping old email from ${emailDate.toLocaleString()}`);
-                            processedCache.add(uid); 
+                            const emailRef = db.collection('processed_emails').doc(uidStr);
+                            const emailDoc = await emailRef.get();
                             
-                            // 🟢 THE CRITICAL FIX: Saves skipped status to Firebase to prevent infinite reads on restart
-                            await emailRef.set({ status: 'old_date_skipped', processedAt: new Date().toISOString() });
+                            if (emailDoc.exists) {
+                                processedCache.add(uid);
+                                continue; 
+                            }
+
+                            console.log(`📥 Downloading payload for UID: ${uid}...`);
+                            const fullMessage = await connection.search([['UID', uid]], { bodies: [''], markSeen: false });
                             
-                            continue;
-                        }
+                            if (!fullMessage || fullMessage.length === 0) continue;
 
-                        const subject = parsedEmail.subject || "No Subject";
-                        const fromAddress = parsedEmail.from?.value?.[0]?.address || parsedEmail.from?.text || "Unknown";
-                        const lowerFrom = fromAddress.toLowerCase();
+                            const all = fullMessage[0].parts.find(part => part.which === '');
+                            const parsedEmail = await simpleParser(all.body);
+                            
+                            const emailDate = parsedEmail.date ? new Date(parsedEmail.date) : new Date();
+                            
+                            if (emailDate < CUTOFF_DATE) {
+                                console.log(`   ⏳ Skipping old email from ${emailDate.toLocaleString()}`);
+                                processedCache.add(uid); 
+                                await emailRef.set({ status: 'old_date_skipped', processedAt: new Date().toISOString() });
+                                continue;
+                            }
 
-                        // THE ZOMATO & IRCTC BLOCKER
-                        if (lowerFrom.includes('zomato') || lowerFrom.includes('irctc')) {
-                            console.log(`🚫 Blocked Ignored Sender: ${subject}`);
-                            processedCache.add(uid);
-                            await emailRef.set({ status: 'ignored_sender', processedAt: new Date().toISOString() });
-                            continue;
-                        }
+                            const subject = parsedEmail.subject || "No Subject";
+                            const fromAddress = parsedEmail.from?.value?.[0]?.address || parsedEmail.from?.text || "Unknown";
+                            const lowerFrom = fromAddress.toLowerCase();
 
-                        if (!subject.match(/Order|Booking|PNR|Reservation|Invoice|Bill|Catering/i)) {
-                            processedCache.add(uid);
-                            await emailRef.set({ status: 'irrelevant_subject', processedAt: new Date().toISOString() });
-                            continue;
-                        }
+                            if (lowerFrom.includes('zomato') || lowerFrom.includes('irctc')) {
+                                console.log(`🚫 Blocked Ignored Sender: ${subject}`);
+                                processedCache.add(uid);
+                                await emailRef.set({ status: 'ignored_sender', processedAt: new Date().toISOString() });
+                                continue;
+                            }
 
-                        console.log(`🤖 AI Analyzing: ${subject} (From: ${fromAddress})`);
-                        let fullText = parsedEmail.text || parsedEmail.html || "";
+                            if (!subject.match(/Order|Booking|PNR|Reservation|Invoice|Bill|Catering/i)) {
+                                processedCache.add(uid);
+                                await emailRef.set({ status: 'irrelevant_subject', processedAt: new Date().toISOString() });
+                                continue;
+                            }
 
-                        if (parsedEmail.attachments && parsedEmail.attachments.length > 0) {
-                            for (let att of parsedEmail.attachments) {
-                                if (att.contentType === 'application/pdf') {
-                                    try {
-                                        const pdfData = await pdfParse(att.content);
-                                        fullText += "\n\n--- PDF CONTENT ---\n" + pdfData.text;
-                                    } catch (e) {}
+                            console.log(`🤖 AI Analyzing: ${subject} (From: ${fromAddress})`);
+                            let fullText = parsedEmail.text || parsedEmail.html || "";
+
+                            if (parsedEmail.attachments && parsedEmail.attachments.length > 0) {
+                                for (let att of parsedEmail.attachments) {
+                                    if (att.contentType === 'application/pdf') {
+                                        try {
+                                            const pdfData = await pdfParse(att.content);
+                                            fullText += "\n\n--- PDF CONTENT ---\n" + pdfData.text;
+                                        } catch (e) {}
+                                    }
                                 }
                             }
-                        }
 
-                        await delay(3000);
+                            await delay(3000);
 
-                        const orderData = await parseWithAWS(fullText, subject, fromAddress);
+                            const orderData = await parseWithAWS(fullText, subject, fromAddress);
 
-                        if (orderData && (orderData.orderNo || orderData.pnr)) {
-                            let finalOrderNo = orderData.orderNo || orderData.pnr || `UNK_${Date.now()}`;
-                            finalOrderNo = finalOrderNo.toString().replace(/\//g, '-').trim();
-                            const cleanFloat = (val) => parseFloat((val || 0).toString().replace(/[^\d.]/g, '')) || 0;
+                            if (orderData && (orderData.orderNo || orderData.pnr)) {
+                                let finalOrderNo = orderData.orderNo || orderData.pnr || `UNK_${Date.now()}`;
+                                finalOrderNo = finalOrderNo.toString().replace(/\//g, '-').trim();
+                                const cleanFloat = (val) => parseFloat((val || 0).toString().replace(/[^\d.]/g, '')) || 0;
 
-                            await db.collection('orders').doc(finalOrderNo).set({
-                                ...orderData,
-                                subTotal: cleanFloat(orderData.subTotal),
-                                tax: cleanFloat(orderData.tax),
-                                deliveryCharge: cleanFloat(orderData.deliveryCharge),
-                                totalAmount: cleanFloat(orderData.totalAmount),
-                                remark: orderData.remark || "",
-                                orderNo: finalOrderNo,
-                                createdAt: new Date().toISOString(),
-                                status: 'Active',
-                                cancellationEmailSent: false
-                            });
+                                await db.collection('orders').doc(finalOrderNo).set({
+                                    ...orderData,
+                                    subTotal: cleanFloat(orderData.subTotal),
+                                    tax: cleanFloat(orderData.tax),
+                                    deliveryCharge: cleanFloat(orderData.deliveryCharge),
+                                    totalAmount: cleanFloat(orderData.totalAmount),
+                                    remark: orderData.remark || "",
+                                    orderNo: finalOrderNo,
+                                    createdAt: new Date().toISOString(),
+                                    status: 'Active',
+                                    cancellationEmailSent: false
+                                });
 
-                            console.log(`✅ SAVED: #${finalOrderNo} | Vendor: ${orderData.vendorName} | Total: ₹${orderData.totalAmount}`);
-                            
-                            processedCache.add(uid);
-                            await emailRef.set({ status: 'success', orderNo: finalOrderNo, processedAt: new Date().toISOString() });
+                                console.log(`✅ SAVED: #${finalOrderNo} | Vendor: ${orderData.vendorName} | Total: ₹${orderData.totalAmount}`);
+                                
+                                processedCache.add(uid);
+                                await emailRef.set({ status: 'success', orderNo: finalOrderNo, processedAt: new Date().toISOString() });
 
-                        } else {
-                            console.log("   ❌ AI Failed or text was unreadable. Skipping.");
-                            processedCache.add(uid);
-                            await emailRef.set({ status: 'failed_parse', processedAt: new Date().toISOString() });
+                            } else {
+                                console.log("   ❌ AI Failed or text was unreadable. Skipping.");
+                                processedCache.add(uid);
+                                await emailRef.set({ status: 'failed_parse', processedAt: new Date().toISOString() });
+                            }
                         }
                     }
                 }
@@ -196,6 +203,8 @@ async function startImapPolling() {
                     try { connection.end(); } catch(e){}
                     try {
                         connection = await imaps.connect(IMAP_CONFIG);
+                        connection.on('error', (e) => console.error("⚠️ Background IMAP Socket Error (Handled):", e.message));
+                        connection.on('end', () => console.log("⚠️ IMAP Connection ended by server."));
                         await connection.openBox('INBOX');
                         console.log("✅ Reconnected securely!");
                     } catch(e) {
@@ -204,6 +213,7 @@ async function startImapPolling() {
                 }
             }
 
+            // Runs the next batch cycle after 30 seconds
             setTimeout(runPollingCycle, 30000); 
         }
 
@@ -227,7 +237,6 @@ async function parseWithAWS(rawText, subject, senderEmail) {
 
     const lowerFrom = senderEmail.toLowerCase();
     
-    // 🔍 SENDER EMAIL → VENDOR MAPPING
     const VENDOR_MAP = [
         { match: 'relfood',       name: 'Rail Food',      type: 'railfood' },
         { match: 'railfood',      name: 'Rail Food',      type: 'railfood' },
@@ -259,7 +268,6 @@ async function parseWithAWS(rawText, subject, senderEmail) {
 
     console.log(`   🏷️ Vendor detected: ${vendorName || 'Unknown'} (${vendorType})`);
 
-    // 🔧 FALLBACK: Extract vendor dynamically from root domain
     if (!vendorName) {
         try {
             const domainParts = lowerFrom.split('@')[1]?.split('.') || [];
@@ -437,7 +445,6 @@ GENERAL RULES:
 
         data.vendorName = vendorName;
 
-        // 🔍 ACTIVE MATH VALIDATION & AUTO-CORRECTION
         if (data.items && Array.isArray(data.items)) {
             console.log("   🔍 Validating item math...");
             let calculatedSubTotal = 0;
@@ -456,7 +463,6 @@ GENERAL RULES:
                 console.log(`      ${item.name}: ₹${item.price} × ${item.quantity} = ₹${lineTotal}`);
             }
 
-            // Fallback safety: Overwrite hallucinated subtotals
             const parsedSubTotal = parseFloat(data.subTotal) || 0;
             if (Math.abs(parsedSubTotal - calculatedSubTotal) > 5) { 
                  console.log(`      ⚠️ SubTotal Mismatch! AI said ₹${parsedSubTotal}, Real Math is ₹${calculatedSubTotal}. Correcting.`);
