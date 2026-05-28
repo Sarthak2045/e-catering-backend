@@ -64,7 +64,7 @@ async function startImapPolling() {
     try {
         connection = await imaps.connect(IMAP_CONFIG);
         
-        // 🛡️ BACKGROUND ERROR SHIELD: Catch random disconnects gracefully
+        // 🛡️ BACKGROUND ERROR SHIELD
         connection.on('error', (err) => {
             console.error("⚠️ Background IMAP Socket Error (Handled):", err.message);
         });
@@ -73,16 +73,17 @@ async function startImapPolling() {
         });
 
         await connection.openBox('INBOX');
-        console.log("✅ Connected! Observer Mode: Strictly watching for UNREAD emails from May 18, 2026, 6:00 PM onwards...");
+        console.log("✅ Connected! Observer Mode: Strictly watching ALL emails from May 28, 2026, 5:00 PM onwards...");
 
         async function runPollingCycle() {
             try {
-                // 🟢 STRICT DATE CUTOFF: May 18, 2026 at 6:00 PM IST
-                const CUTOFF_DATE = new Date('2026-05-18T18:00:00+05:30'); 
+                // 🟢 STRICT DATE CUTOFF: May 28, 2026 at 5:00 PM IST
+                const CUTOFF_DATE = new Date('2026-05-28T17:00:00+05:30'); 
                 
-                // 🟢 STRICT UNSEEN FILTER: Only fetch emails that are marked as Unread in Gmail
-                const searchCriteria = ['UNSEEN', ['SINCE', 'May 18, 2026']];
+                // 🟢 IMAP FETCH: Ask Gmail for ALL emails starting May 28th
+                const searchCriteria = ['ALL', ['SINCE', 'May 28, 2026']];
                 
+                // Fetch basic headers so we can do the Pre-Filter without downloading payloads
                 const fetchOptions = { bodies: ['HEADER.FIELDS (SUBJECT)'], markSeen: false }; 
                 
                 const searchPromise = connection.search(searchCriteria, fetchOptions);
@@ -94,7 +95,6 @@ async function startImapPolling() {
                     const newMessages = messages.filter(m => !processedCache.has(m.attributes.uid));
                     
                     if (newMessages.length > 0) {
-                        // 🟢 BATCH PROCESSING: Slice the backlog into safe chunks to prevent IMAP timeouts
                         const BATCH_SIZE = 15;
                         const currentBatch = newMessages.slice(0, BATCH_SIZE);
                         
@@ -103,7 +103,19 @@ async function startImapPolling() {
                         for (let item of currentBatch) {
                             const uid = item.attributes.uid;
                             const uidStr = uid.toString();
+                            
+                            // Native IMAP Arrival Date (Requires zero downloading or parsing)
+                            const emailDate = item.attributes.date;
 
+                            // 🛑 THE PRE-FILTER OPTIMIZATION: Check date BEFORE talking to Firebase
+                            // This ensures we do not waste Database Reads on emails outside our target window.
+                            if (emailDate < CUTOFF_DATE) {
+                                console.log(`   ⏳ Pre-filtered old email: ${emailDate.toLocaleString()}`);
+                                processedCache.add(uid); 
+                                continue; // Skips Firebase completely!
+                            }
+
+                            // 🟢 FIREBASE CHECK: Only runs for emails that survived the date filter
                             const emailRef = db.collection('processed_emails').doc(uidStr);
                             const emailDoc = await emailRef.get();
                             
@@ -119,15 +131,6 @@ async function startImapPolling() {
 
                             const all = fullMessage[0].parts.find(part => part.which === '');
                             const parsedEmail = await simpleParser(all.body);
-                            
-                            const emailDate = parsedEmail.date ? new Date(parsedEmail.date) : new Date();
-                            
-                            if (emailDate < CUTOFF_DATE) {
-                                console.log(`   ⏳ Skipping old email from ${emailDate.toLocaleString()}`);
-                                processedCache.add(uid); 
-                                await emailRef.set({ status: 'old_date_skipped', processedAt: new Date().toISOString() });
-                                continue;
-                            }
 
                             const subject = parsedEmail.subject || "No Subject";
                             const fromAddress = parsedEmail.from?.value?.[0]?.address || parsedEmail.from?.text || "Unknown";
@@ -213,7 +216,6 @@ async function startImapPolling() {
                 }
             }
 
-            // Runs the next batch cycle after 30 seconds
             setTimeout(runPollingCycle, 30000); 
         }
 
